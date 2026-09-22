@@ -1,0 +1,69 @@
+[
+    {
+        "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/logo.png",
+        "fileHash": "sha256-2c5c515145be3c818441302c1107d24a59da94a297c2698b197e567857e418db",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/antonydp/retrocinema",
+        "fileSize": 90413,
+        "status": 1,
+        "language": "it",
+        "authors": [
+            "antonydp",
+            "Luna712",
+            "recloudstream",
+            "doGior"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 7,
+        "internalName": "RetroCinema",
+        "description": "TUTTO IN ITALIANO con SCROLL INFINITO ovunque. Nuove uscite ogni giorno (StreamingCommunity), 114+ classici italiani verificati uno a uno (Tot\u00f2, Sordi, Gassman, Fellini, De Sica), storie d'amore, film con i bambini e dal libro al film (RaiPlay: Cinema ragazzi, Dal libro al film, 25 anni Rai Cinema, film in esclusiva), Stanlio e Ollio, commedia all'italiana, melodrammi, comiche. Righe infinite per genere: commedie, drammi, romance, famiglia, avventura, animazione. Ricerca paginata. Niente horror, niente serie TV, solo film per la famiglia.",
+        "url": "https://raw.githubusercontent.com/antonydp/retrocinema/builds/RetroCinema.cs3",
+        "name": "RetroCinema"
+    },
+    {
+        "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/sisterhappy_logo.png",
+        "fileHash": "sha256-8e93da3ec369fe65f2003c419aeff640d107208d1136b0266178583885a7b541",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/antonydp/retrocinema",
+        "fileSize": 42162,
+        "status": 1,
+        "language": "it",
+        "authors": [
+            "antonydp"
+        ],
+        "tvTypes": [
+            "TvSeries"
+        ],
+        "version": 8,
+        "internalName": "SisterHappy",
+        "description": "Una sola serie TV, tutta in italiano: la stagione pi\u00f9 recente in cima alla lista, con episodi nuovi che appaiono da soli. I link MaxStream, DeltaBit e MixDrop vengono aperti in automatico: il plugin risolve i protettori di link con richieste leggere, gestendo cookie e redirect come un browser, e ricava il video direttamente. Semplice da usare: apri, scegli l'episodio, guarda.",
+        "url": "https://raw.githubusercontent.com/antonydp/retrocinema/builds/SisterHappy.cs3",
+        "name": "SisterHappy"
+    },
+    {
+        "iconUrl": "https://streamingunity.fun/apple-touch-icon.png",
+        "fileHash": "sha256-add21f96b2a53edeb7915d27a71aab17441959f072242bd1d35ff9a76d742bb5",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/antonydp/retrocinema",
+        "fileSize": 75642,
+        "status": 1,
+        "language": "it",
+        "authors": [
+            "antonydp",
+            "doGior"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Documentary",
+            "Cartoon"
+        ],
+        "version": 6,
+        "internalName": "StreamingCommunity",
+        "description": "StreamingCommunity con la home che puoi SCEGLIERE: tocca il titolo di una riga in home e apri le impostazioni del plugin per riordinare o nascondere le sezioni (nuovo: riordino TRASCINANDO le righe; preset Standard, Famiglia, Solo film, Solo serie). In cima Top 10 serie e Top 10 film, Tendenze di adesso, Aggiunti di recente, poi tutti i generi in ordine di tendenza e le annate in fondo. TUTTE le righe con scroll infinito, Tendenze e Aggiunti comprese (pagine browse ufficiali del sito con richiesta a rotazione di tre stili). Film e serie in italiano con 1080p FHD. Righe che si caricano sempre: richieste in sequenza e riprova automatica. Basato sul provider di doGior (GPL-3.0), con domini di riserva automatici.",
+        "url": "https://raw.githubusercontent.com/antonydp/retrocinema/builds/StreamingCommunity.cs3",
+        "name": "StreamingCommunity"
+    }
+]
