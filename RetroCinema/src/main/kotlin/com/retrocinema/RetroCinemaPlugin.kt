@@ -1,13 +1,12 @@
-package com.retrocinema.archive
+package com.retrocinema
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
 @CloudstreamPlugin
-class InternetArchivePlugin : Plugin() {
+class RetroCinemaPlugin : Plugin() {
     override fun load(context: Context) {
-        // Tutti i provider vanno registrati in questo modo
-        registerMainAPI(InternetArchiveProvider())
+        registerMainAPI(RetroCinemaProvider())
     }
 }

@@ -1,6 +1,6 @@
 {
     "name": "RetroCinema",
-    "description": "Il cinema di una volta: film classici e d'epoca da Internet Archive, RaiPlay e StreamingCommunity. Catalogo curato con Commedie all'italiana, Musical, Western e Film Noir.",
+    "description": "Il cinema di una volta, tutto in un solo plugin: classici italiani (Totò, Sordi, Gassman), Grandi Classici di Hollywood, Stanlio e Ollio, Musical, Western e Film Noir. Contenuti scelti a mano e in italiano, solo film adatti a tutta la famiglia.",
     "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/logo.png",
     "manifestVersion": 1,
     "pluginLists": [
