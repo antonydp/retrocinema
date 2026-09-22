@@ -1,0 +1,9 @@
+{
+    "name": "RetroCinema",
+    "description": "Il cinema di una volta: film classici e d'epoca da Internet Archive, RaiPlay e StreamingCommunity. Catalogo curato con Commedie all'italiana, Musical, Western e Film Noir.",
+    "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/logo.png",
+    "manifestVersion": 1,
+    "pluginLists": [
+        "https://raw.githubusercontent.com/antonydp/retrocinema/builds/plugins.json"
+    ]
+}
