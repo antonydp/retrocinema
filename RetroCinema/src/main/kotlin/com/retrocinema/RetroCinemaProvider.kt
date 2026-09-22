@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
+import com.lagradost.cloudstream3.SearchResponseList
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.app
@@ -21,13 +22,13 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newSearchResponseList
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import java.util.regex.Pattern
@@ -82,6 +83,40 @@ class RetroCinemaProvider : MainAPI() {
         return iaBadTitleWords.none { t.contains(it) }
     }
 
+    // Token di spam nei titoli degli upload IA (qualità, uploader, contenitori)
+    private val iaSpamTokens = setOf(
+        "1080p", "720p", "480p", "360p", "2160p", "4k", "uhd", "hd", "hq",
+        "blu-ray", "bluray", "brrip", "dvdrip", "dvd", "web-dl", "webdl", "web",
+        "x264", "x265", "h264", "h265", "hevc", "aac", "ac3", "mp3", "yts", "yify",
+        "rarbg", "ita", "eng", "sub", "subs", "vhs", "remux", "xvid", "divx",
+        "avi", "mp4", "mkv", "full", "completo", "zoowoman.website", "zoowoman",
+        "angee", "para", "website", "swu", "fc", "hdrip", "hdtv", "colorized",
+        "restored", "restaurato", "restaurata", "video", "quality", "upgrade"
+    )
+
+    // Pulizia titoli IA: via virgolette, AKA, qualità e spam degli uploader
+    private fun cleanIaTitle(raw: String): String {
+        var t = raw.replace('_', ' ')
+        t = t.replace(Regex("[\"\u201c\u201d]"), " ")
+        t = t.replace(Regex("\\bAKA\\b.*", RegexOption.IGNORE_CASE), " ")
+        t = t.replace(Regex("\\bstarring\\b.*", RegexOption.IGNORE_CASE), " ")
+        t = t.replace(Regex("\\[[^\\]]*\\]"), " ")
+        t = t.replace(Regex("[(){}<>]"), " ")
+        val out = StringBuilder()
+        for (tokRaw in t.split(" ")) {
+            val tok = tokRaw.trim().trim('.', ',', ';', ':', '-')
+            if (tok.isEmpty()) continue
+            val low = tok.lowercase()
+            val isYear = Regex("^(19|20)\\d{2}$").matches(low)
+            if (!isYear && (low.length == 1 || low in iaSpamTokens ||
+                        Regex("^(19|20)\\d{2}p$").matches(low))) continue
+            out.append(tok).append(' ')
+        }
+        t = out.toString().trim().trimEnd('-', '\u2013', '\u2014', ':', ',', '.')
+        t = t.replace(Regex("\\s+"), " ")
+        return t.ifBlank { raw }
+    }
+
     private fun isCleanRaiItem(node: JsonNode): Boolean {
         for (f in listOf("genre", "subgenre")) {
             val v = node.get(f)?.asTextOrNull()?.lowercase() ?: continue
@@ -103,11 +138,14 @@ class RetroCinemaProvider : MainAPI() {
     //  Dati passati da load() a loadLinks()
     // ------------------------------------------------------------------
     data class LoadData(
-        val src: String,                       // "ia" | "iaplaylist" | "rai"
-        val id: String? = null,                // identifier archive.org
+        val src: String,                       // "iaplaylist" | "rai"
+        val id: String? = null,                // identifier archive.org (storico)
         val path: String? = null,              // path video json RaiPlay
-        val urlData: Set<URLData>? = null      // playlist IA (file multipli)
+        val urlData: Set<URLData>? = null,     // file IA (uno o più), link diretti
+        val subs: List<IaSub>? = null          // sottotitoli .vtt archive.org
     )
+
+    data class IaSub(val url: String, val lang: String)
 
     data class URLData(
         val url: String,
@@ -124,74 +162,38 @@ class RetroCinemaProvider : MainAPI() {
         return if (extra.isBlank()) base else "$base AND ($extra)"
     }
 
-    private val commediaQ = iaQ(
-        "(title:(\"alberto sordi\") OR creator:(\"alberto sordi\") " +
-                "OR title:(\"totò\") OR creator:(\"totò\") " +
-                "OR title:(\"peppino de filippo\") OR creator:(\"peppino de filippo\") " +
-                "OR title:(\"anna magnani\") OR creator:(\"anna magnani\") " +
-                "OR title:(\"vittorio gassman\") OR creator:(\"vittorio gassman\") " +
-                "OR title:(\"nino manfredi\") OR creator:(\"nino manfredi\") " +
-                "OR title:(\"gina lollobrigida\") OR creator:(\"gina lollobrigida\") " +
-                "OR title:(\"totò a colori\"))"
-    )
-
-    private val musicalQ = iaQ(
-        "(creator:(\"fred astaire\") OR title:(\"fred astaire\") " +
-                "OR creator:(\"judy garland\") OR title:(\"judy garland\") " +
-                "OR creator:(\"gene kelly\") OR title:(\"gene kelly\") " +
-                "OR subject:(musical))"
-    )
-
-    private val westernQ = iaQ("(subject:(western) OR collection:(westerns))")
-
-    private val noirQ = iaQ("(subject:(\"film noir\") OR subject:(noir) OR subject:(gangster))")
-
-    private val capolavoriQ = iaQ(
-        "(title:(\"de sica\") OR creator:(\"de sica\") " +
-                "OR title:(rossellini) OR creator:(rossellini) " +
-                "OR title:(fellini) OR title:(visconti) OR title:(monicelli))"
-    )
-
     private val decadeFilter = "AND NOT title:(dracula OR frankenstein OR zombie OR monster)"
-
-    // Film scelti a mano, verificati uno a uno (esistono e hanno video).
-    private val daVedere = listOf(
-        Triple("McLintock!", "mclintok_widescreen", 1963),
-        Triple("La grande guerra (Sordi e Gassman)", "a-grande-guerra", 1959),
-        Triple("Un italiano in America", "un-italiano-in-america-1967-hd", 1967),
-        Triple("Un giorno in pretura", "un-giorno-in-pretura-film-completo-con-alberto-sordi-e-peppino-de-filippo", 1954),
-        Triple("Piccola posta", "piccola-posta-1955-franca-valeri-e-alberto-sordi", 1955),
-        Triple("Santa Fe Trail", "Santa_Fe_Trail_movie", 1940),
-        Triple("War of the Wildcats", "WarOfTheWildcats-JohnWayne1943", 1943),
-        Triple("Only the Valiant", "OnlytheValaint", 1951),
-        Triple("The Gun and the Pulpit", "cco_thegunandthepulpit", 1974)
-    )
 
     override val mainPage = mainPageOf(
         Pair("local|", "Da vedere assolutamente"),
+        Pair("cat|italiani", "Grandi film italiani"),
         Pair("rai|grandiclassicidihollywood", "Grandi Classici di Hollywood"),
-        Pair("rai|stanlioeollio-edizionirestaurate", "Stanlio e Ollio (edizioni restaurate)"),
+        Pair("rai|stanlioeollio-edizionirestaurate", "Stanlio e Ollio restaurati"),
+        Pair("cat|comiche", "Comiche: Chaplin, Keaton e Stanlio e Ollio"),
+        Pair("cat|western", "Western"),
+        Pair("cat|noir", "Film Noir e Gangster"),
+        Pair("cat|musical", "Musical"),
+        Pair("cat|avventura", "Avventura e Grande Storia"),
         Pair("raimulti|ilgrandecinema", "Il grande cinema su RaiPlay"),
-        Pair("ia|", "I più visti su Internet Archive"),
-        Pair("ia|$commediaQ", "Commedia all'Italiana"),
-        Pair("ia|$musicalQ", "Musical"),
-        Pair("ia|$westernQ", "Western"),
-        Pair("ia|$noirQ", "Film Noir e Gangster"),
-        Pair("ia|$capolavoriQ", "Capolavori italiani"),
-        Pair("ia|" + iaQ("year:[1930 TO 1939] $decadeFilter"), "Anni '30"),
         Pair("ia|" + iaQ("year:[1940 TO 1949] $decadeFilter"), "Anni '40"),
         Pair("ia|" + iaQ("year:[1950 TO 1959] $decadeFilter"), "Anni '50"),
-        Pair("ia|" + iaQ("year:[1960 TO 1969] $decadeFilter"), "Anni '60")
+        Pair("ia|" + iaQ("year:[1960 TO 1969] $decadeFilter"), "Anni '60"),
+        Pair("ia|", "Scopri film sempre nuovi")
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val data = request.data ?: ""
+        var hasMore = false
         val list: List<SearchResponse> = try {
             when {
-                data.startsWith("local|") -> daVedereRow()
+                data.startsWith("local|") -> catalogRow(Catalogo.daVedere)
+                data.startsWith("cat|") -> catalogRow(catalogFor(data.removePrefix("cat|")))
                 data.startsWith("rai|") -> raiCollectionRow(data.removePrefix("rai|"), page)
                 data.startsWith("raimulti|") -> raiMultiRow(data.removePrefix("raimulti|"), page)
-                data.startsWith("ia|") -> iaSearchRow(data.removePrefix("ia|"), page)
+                data.startsWith("ia|") -> {
+                    hasMore = page < 8
+                    iaSearchRow(data.removePrefix("ia|"), page)
+                }
                 else -> emptyList()
             }
         } catch (_: Exception) {
@@ -201,20 +203,26 @@ class RetroCinemaProvider : MainAPI() {
             listOf(
                 HomePageList(request.name ?: name, list, true) // righe orizzontali stile Netflix
             ),
-            hasNext = false
+            hasNext = hasMore && list.isNotEmpty()
         )
     }
 
-    // ---- Riga fissa "Da vedere assolutamente" (nessuna richiesta di rete) ----
-    private fun daVedereRow(): List<SearchResponse> {
-        return daVedere.mapNotNull { (title, id, year) ->
-            newMovieSearchResponse(
-                title,
-                "$iaUrl/details/$id",
-                TvType.Movie
-            ) {
-                this.posterUrl = "$iaUrl/services/img/$id"
-                this.year = year
+    private fun catalogFor(key: String): List<FilmCatalogo> = when (key) {
+        "italiani" -> Catalogo.italiani
+        "western" -> Catalogo.western
+        "noir" -> Catalogo.noir
+        "musical" -> Catalogo.musical
+        "avventura" -> Catalogo.avventura
+        "comiche" -> Catalogo.comiche
+        else -> emptyList()
+    }
+
+    // Riga dal catalogo verificato: istantanea, zero richieste di rete
+    private fun catalogRow(films: List<FilmCatalogo>): List<SearchResponse> {
+        return films.map { f ->
+            newMovieSearchResponse(f.titolo, "$iaUrl/details/${f.id}", TvType.Movie) {
+                this.posterUrl = "$iaUrl/services/img/${f.id}"
+                this.year = f.anno
             }
         }
     }
@@ -277,7 +285,7 @@ class RetroCinemaProvider : MainAPI() {
 
     private fun IA_DOC.toSearch(): SearchResponse? {
         val id = identifier ?: return null
-        val t = toStr(title) ?: id
+        val t = toStr(title)?.let { cleanIaTitle(it) } ?: id
         return newMovieSearchResponse(t, "$iaUrl/details/$id", TvType.Movie) {
             this.posterUrl = "$iaUrl/services/img/$id"
             this.year = toYear(year)
@@ -285,55 +293,62 @@ class RetroCinemaProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    //  RICERCA — Internet Archive + RaiPlay, risultati uniti
+    //  RICERCA — paginata (scroll infinito): IA + RaiPlay
     // ------------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        val q = query.trim()
-        if (q.isBlank()) return emptyList()
-        val out = mutableListOf<SearchResponse>()
+        return search(query, 1)?.items ?: emptyList()
+    }
 
-        // 1) Internet Archive (film del dominio pubblico)
+    override suspend fun search(query: String, page: Int): SearchResponseList? {
+        val q = query.trim()
+        if (q.isBlank()) return newSearchResponseList(emptyList(), false)
+        val out = mutableListOf<SearchResponse>()
+        var hasMore = false
+
+        // 1) Internet Archive, paginato (film del dominio pubblico)
         try {
             val iaQuery = "mediatype:(movies) AND NOT subject:(horror) AND (title:($q) OR creator:($q))"
             val url = "$iaUrl/advancedsearch.php" +
                     "?q=" + java.net.URLEncoder.encode(iaQuery, "UTF-8") +
                     "&fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=year" +
-                    "&sort%5B%5D=downloads+desc&rows=20&output=json"
+                    "&sort%5B%5D=downloads+desc&rows=20&page=$page&output=json"
             val res = tryParseJson<IA_SEARCH>(app.get(url).text)
-            res?.response?.docs.orEmpty().mapNotNull { it.toSearch() }
-                .filter { isCleanTitle(it.name) }
-                .let { out.addAll(it) }
+            val docs = res?.response?.docs.orEmpty()
+            out.addAll(docs.mapNotNull { it.toSearch() }.filter { isCleanTitle(it.name) })
+            hasMore = docs.size >= 20
         } catch (_: Exception) {
         }
 
-        // 2) RaiPlay (classici disponibili in italiano)
-        try {
-            val html = app.get(
-                "$mainUrl/ricerca.html?q=" + java.net.URLEncoder.encode(q, "UTF-8")
-            ).text
-            val doc = Jsoup.parse(html)
-            val seen = mutableSetOf<String>()
-            for (a in doc.select("a[data-info-url], a[data-video-json]")) {
-                val rawPath = a.attr("data-info-url").ifBlank { a.attr("data-video-json") }
-                if (!rawPath.startsWith("/programmi/") && !rawPath.startsWith("/video/")) continue
-                if (!rawPath.endsWith(".json")) continue
-                val title = a.attr("aria-label")
-                    .removePrefix("maggiori informazioni su ")
-                    .ifBlank { a.selectFirst("img")?.attr("alt").orEmpty() }
-                if (title.isBlank()) continue
-                if (rawPath in seen) continue
-                seen.add(rawPath)
-                val img = a.selectFirst("img")?.attr("abs:src").orEmpty()
-                out.add(
-                    newMovieSearchResponse(title, "$mainUrl$rawPath", TvType.Movie) {
-                        if (img.isNotBlank()) this.posterUrl = img
-                    }
-                )
+        // 2) RaiPlay (classici disponibili in italiano) — solo prima pagina
+        if (page == 1) {
+            try {
+                val html = app.get(
+                    "$mainUrl/ricerca.html?q=" + java.net.URLEncoder.encode(q, "UTF-8")
+                ).text
+                val doc = Jsoup.parse(html)
+                val seen = mutableSetOf<String>()
+                for (a in doc.select("a[data-info-url], a[data-video-json]")) {
+                    val rawPath = a.attr("data-info-url").ifBlank { a.attr("data-video-json") }
+                    if (!rawPath.startsWith("/programmi/") && !rawPath.startsWith("/video/")) continue
+                    if (!rawPath.endsWith(".json")) continue
+                    val title = a.attr("aria-label")
+                        .removePrefix("maggiori informazioni su ")
+                        .ifBlank { a.selectFirst("img")?.attr("alt").orEmpty() }
+                    if (title.isBlank()) continue
+                    if (rawPath in seen) continue
+                    seen.add(rawPath)
+                    val img = a.selectFirst("img")?.attr("abs:src").orEmpty()
+                    out.add(
+                        newMovieSearchResponse(title, "$mainUrl$rawPath", TvType.Movie) {
+                            if (img.isNotBlank()) this.posterUrl = img
+                        }
+                    )
+                }
+            } catch (_: Exception) {
             }
-        } catch (_: Exception) {
         }
 
-        return out.distinctBy { it.url }
+        return newSearchResponseList(out.distinctBy { it.url }, hasMore)
     }
 
     // ------------------------------------------------------------------
@@ -522,14 +537,17 @@ class RetroCinemaProvider : MainAPI() {
         val m = res.metadata ?: throw ErrorLoadingException("Risposta non valida da archive.org")
         val title = toStr(m.title) ?: identifier
 
-        // Filtra i file video come il provider ufficiale
-        val videoFiles = res.files.orEmpty().filter {
-            it.lengthInSeconds >= 10.0 &&
-                    (it.format?.contains("MPEG", true) == true ||
-                            it.format?.startsWith("H.264", true) == true ||
-                            it.format?.startsWith("Matroska", true) == true ||
-                            it.format?.startsWith("DivX", true) == true)
+        // Solo file veramente riproducibili (MP4/MKV/AVI, niente Ogg né derivati IA)
+        val videoFiles = playableIaFiles(res)
+        if (videoFiles.isEmpty()) {
+            throw ErrorLoadingException("Nessun file video riproducibile su Internet Archive")
         }
+
+        // Sottotitoli .vtt presenti nell'item
+        val subs = res.files.orEmpty()
+            .filter { (it.name ?: "").endsWith(".vtt", true) }
+            .map { IaSub(iaFileUrl(res, identifier, it.name ?: ""), "Internet Archive") }
+            .take(8)
 
         val metaYear = toYear(m.year) ?: extractYear(m.date)
         val metaPlot = toStr(m.description)?.let { cleanHtml(it) }
@@ -544,14 +562,18 @@ class RetroCinemaProvider : MainAPI() {
         val distinctVideos = videoFiles.distinctBy { getUniqueName(it.name ?: "") }
 
         return if (distinctVideos.size <= 1) {
-            // FILM SINGOLO: l'estrattore interno di CloudStream gestisce
-            // archive.org/details/ in modo collaudato (pattern ufficiale)
-            newMovieLoadResponse(title, url, TvType.Movie, LoadData(src = "ia", id = identifier)) {
+            // FILM SINGOLO: link DIRETTI costruiti dai metadata.
+            // Non usiamo l'estrattore interno (ha un selettore CSS rotto e
+            // lascia il player in caricamento all'infinito).
+            newMovieLoadResponse(
+                title, url, TvType.Movie,
+                LoadData(src = "iaplaylist", id = identifier, urlData = buildIaUrls(res, identifier, videoFiles), subs = subs)
+            ) {
                 this.plot = metaPlot
                 this.year = metaYear
                 this.tags = metaTags
                 this.posterUrl = "$iaUrl/services/img/$identifier"
-                this.duration = (videoFiles.firstOrNull()?.lengthInSeconds ?: 0f).let {
+                this.duration = (videoFiles.maxOfOrNull { it.lengthInSeconds } ?: 0f).let {
                     if (it > 0f) (it / 60).roundToInt() else null
                 }
                 this.actors = toStr(m.creator)?.let {
@@ -560,33 +582,25 @@ class RetroCinemaProvider : MainAPI() {
             }
         } else {
             // Item con più video distinti: playlist a episodi (pattern ufficiale)
-            val urlMap = linkedMapOf<String, MutableSet<URLData>>()
-            for (file in videoFiles) {
-                val cleanedName = (file.original ?: file.name ?: continue)
-                    .substringAfterLast('/').substringBeforeLast('.').replace('_', ' ')
-                val link = if (res.server != null && res.dir != null) {
-                    "https://${res.server}${res.dir}/${file.name}"
-                } else {
-                    "$iaUrl/download/$identifier/${file.name}"
-                }
-                val q = (file.height ?: 480).coerceIn(240, 1080)
-                urlMap.getOrPut(cleanedName) { mutableSetOf() }.add(
-                    URLData(link, file.format ?: "", file.size ?: 0f, q)
-                )
-            }
-
             val mostFrequentMinutes = videoFiles
                 .map { (it.lengthInSeconds / 60).roundToInt() }
                 .groupBy { it }
                 .maxByOrNull { it.value.count() }?.key
 
-            val episodes: List<Episode> = urlMap.map { (fileName, urls) ->
-                val file = videoFiles.first {
-                    (it.original ?: it.name ?: "").substringAfterLast('/')
-                        .substringBeforeLast('.').replace('_', ' ') == fileName
+            val episodes: List<Episode> = distinctVideos.map { fileName ->
+                val files = videoFiles.filter {
+                    getUniqueName(it.name ?: "") == fileName
                 }
-                newEpisode(LoadData(src = "iaplaylist", urlData = urls).toJson()) {
-                    name = file.title ?: fileName
+                val file = files.first()
+                val cleanedName = (file.original ?: file.name ?: fileName)
+                    .substringAfterLast('/').substringBeforeLast('.').replace('_', ' ')
+                newEpisode(
+                    LoadData(
+                        src = "iaplaylist", id = identifier,
+                        urlData = buildIaUrls(res, identifier, files)
+                    ).toJson()
+                ) {
+                    name = file.title ?: cleanedName
                     runTime = (file.lengthInSeconds / 60).roundToInt()
                 }
             }
@@ -599,6 +613,42 @@ class RetroCinemaProvider : MainAPI() {
                 this.duration = mostFrequentMinutes
             }
         }
+    }
+
+    // File video riproducibili da ExoPlayer: contenitori noti, formati noti,
+    // niente Ogg Video (ExoPlayer non lo legge) e niente duplicati "IA".
+    private fun playableIaFiles(res: MetadataResult): List<MediaFile> {
+        return res.files.orEmpty().filter { f ->
+            val fmt = (f.format ?: "").lowercase()
+            val fileName = (f.name ?: "").lowercase()
+            val goodContainer = fileName.endsWith(".mp4") || fileName.endsWith(".m4v") ||
+                    fileName.endsWith(".mkv") || fileName.endsWith(".avi") ||
+                    fileName.endsWith(".mpg") || fileName.endsWith(".mpeg")
+            val goodFormat = fmt.contains("h.264") || fmt.contains("mpeg4") ||
+                    fmt.contains("mpeg") || fmt.contains("quicktime") ||
+                    fmt.contains("matroska") || fmt.contains("divx")
+            f.lengthInSeconds >= 60.0 && goodContainer && goodFormat &&
+                    !fmt.endsWith("ia") && !fmt.contains("ogg")
+        }
+    }
+
+    // URL diretto al file: preferisce il server dati (più affidabile e veloce),
+    // ricade su /download/. Il nome file è URL-encoded (spazi e parentesi).
+    private fun iaFileUrl(res: MetadataResult, id: String, fileName: String): String {
+        val enc = java.net.URLEncoder.encode(fileName, "UTF-8").replace("+", "%20")
+        val server = res.server
+        val dir = res.dir
+        return if (!server.isNullOrBlank() && !dir.isNullOrBlank())
+            "https://$server$dir/$enc"
+        else
+            "$iaUrl/download/$id/$enc"
+    }
+
+    private fun buildIaUrls(res: MetadataResult, id: String, files: List<MediaFile>): Set<URLData> {
+        return files.sortedByDescending { it.size ?: 0f }.take(4).map { f ->
+            val q = (f.height ?: 480).coerceIn(240, 1080)
+            URLData(iaFileUrl(res, id, f.name ?: ""), f.format ?: "", f.size ?: 0f, q)
+        }.toSet()
     }
 
     // ---- RaiPlay: programma ufficiale (es. /programmi/gilda.json) ----
@@ -660,16 +710,14 @@ class RetroCinemaProvider : MainAPI() {
         val load = tryParseJson<LoadData>(data) ?: return false
 
         return when (load.src) {
-            // ---------- Internet Archive: estrattore interno collaudato ----------
-            "ia" -> {
-                val id = load.id ?: return false
-                loadExtractor("$iaUrl/details/$id", subtitleCallback, callback)
-                true
-            }
-
-            // ---------- Playlist Internet Archive (pattern ufficiale) ----------
+            // ---------- Internet Archive: link diretti + sottotitoli .vtt ----------
             "iaplaylist" -> {
                 val urls = load.urlData.orEmpty()
+                load.subs.orEmpty().forEach { s ->
+                    if (s.url.isNotBlank()) {
+                        subtitleCallback(SubtitleFile(s.lang.ifBlank { "Italiano" }, s.url))
+                    }
+                }
                 urls.sortedByDescending { it.size }.forEach { u ->
                     callback(
                         newExtractorLink(

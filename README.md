@@ -40,23 +40,26 @@ Tocca il nome del fornitore in alto sulla home (o il pulsante delle categorie), 
 
 ---
 
-## 🏠 Cosa trovi in Home (14 righe curate)
+## 🏠 Cosa trovi in Home (14 righe curate + scroll infinito)
 
 | Riga | Contenuto |
 |---|---|
-| **Da vedere assolutamente** | Film scelti e verificati a mano: McLintock!, La grande guerra (Sordi e Gassman), Un italiano in America… |
+| **Da vedere assolutamente** | I 16 migliori film del catalogo verificato: Amarcord, La ciociara, Boccaccio '70, La grande guerra… |
+| **Grandi film italiani** | 30 capolavori verificati: Fellini, De Sica, Visconti, Monicelli, Sordi, Totò, Gassman |
 | **Grandi Classici di Hollywood** | Su RaiPlay: Gilda, La signora del venerdì, Da qui all'eternità, Funny Girl… |
-| **Stanlio e Ollio (edizioni restaurate)** | 26 film della coppia più amata, restaurati e in italiano |
+| **Stanlio e Ollio restaurati** | 26 film della coppia più amata, restaurati e in italiano |
+| **Comiche: Chaplin, Keaton e Stanlio e Ollio** | I capolavori del cinema muto che fanno ridere tutti |
+| **Western** | 30 film verificati: John Wayne, duelli all'alba e grandi spazi |
+| **Film Noir e Gangster** | 30 film verificati: detective, femme fatale e gangster anni '40–'50 |
+| **Musical** | 30 film verificati: Astaire, Garland, Gene Kelly, Bing Crosby |
+| **Avventura e Grande Storia** | Tarzan, Il libro della giungla, avventure d'altri tempi |
 | **Il grande cinema su RaiPlay** | Il Gattopardo, La piscina, Gruppo di famiglia in un interno… |
-| **I più visti su Internet Archive** | I classici del dominio pubblico più amati, aggiornati da soli |
-| **Commedia all'Italiana** | Totò, Alberto Sordi, Vittorio Gassman, Anna Magnani, Nino Manfredi, Gina Lollobrigida |
-| **Musical** | Fred Astaire, Judy Garland, Gene Kelly e i grandi musical |
-| **Western** | John Wayne, duelli all'alba e grandi spazi |
-| **Film Noir e Gangster** | Detective, femme fatale e gangster degli anni '40–'50 |
-| **Capolavori italiani** | De Sica, Rossellini, Fellini, Visconti, Monicelli |
-| **Anni '30 / '40 / '50 / '60** | Un viaggio per decennio |
+| **Anni '40 / '50 / '60** | Un viaggio per decennio — **scrolla fino in fondo: arrivano altri film** |
+| **Scopri film sempre nuovi** | Il resto del catalogo, ordinato per popolarità — **scroll infinito** |
 
-La **ricerca** cerca contemporaneamente su RaiPlay e Internet Archive e unisce i risultati.
+Oltre **180 film verificati uno a uno** (esistono, sono davvero film, e hanno un file video riproducibile) + infinite pagine di scoperta via scroll.
+
+La **ricerca** cerca contemporaneamente su RaiPlay e Internet Archive e **continua a caricare risultati mentre scorri**.
 
 ---
 
@@ -83,6 +86,7 @@ retrocinema/
 └── RetroCinema/                ← UN solo modulo = UN solo plugin .cs3
     └── src/main/kotlin/com/retrocinema/
         ├── RetroCinemaProvider.kt   ← tutta la logica (home, ricerca, load, link)
+        ├── Catalogo.kt              ← catalogo verificato generato da script
         └── RetroCinemaPlugin.kt     ← registrazione del provider
 ```
 
@@ -90,14 +94,15 @@ retrocinema/
 Ogni push su `main`/`master` avvia **GitHub Actions**: il workflow esegue `./gradlew make makePluginsJson`, copia i `.cs3` e il `plugins.json` generato nel branch **`builds`**. Il `repo.json` punta lì: l'app scarica sempre l'ultima build, con **aggiornamento automatico** (basta incrementare `version` nel `build.gradle.kts` del modulo).
 
 ### Come sono scelti i contenuti
+- **Catalogo verificato (181 film)**: ogni film è stato controllato automaticamente via API `metadata` di Internet Archive prima di entrare nel catalogo — deve esistere, essere un film (mediatype movies), avere un file MP4/MKV riproducibile da ExoPlayer e superare i filtri anti-horror. Titoli e anni vengono puliti dallo spam degli uploader.
 - **RaiPlay** (legale, ufficiale, tutto in italiano): le righe usano le collezioni editoriali verificate `grandiclassicidihollywood`, `stanlioeollio-edizionirestaurate`, `ilgrandecinema` — si aggiornano da sole quando Rai cambia il catalogo. Gli item con genere *horror/erotico* vengono filtrati nel codice.
-- **Internet Archive** (dominio pubblico): ogni riga è una query Lucene su `collection:(feature_films)` con `NOT subject:(horror)`, ordinata per `downloads desc`. Il rumore della ricerca (musica, concerti) è filtrato da una blocklist dei titoli.
-- La riga **"Da vedere assolutamente"** è una lista fissa di identifier verificati uno a uno.
+- **Internet Archive dinamico**: le righe decenni e "Scopri film sempre nuovi" sono query Lucene su `collection:(feature_films)` con `NOT subject:(horror)`, ordinate per `downloads desc`, con **paginazione nativa (scroll infinito, fino a 8 pagine)**.
 
 ### Note tecniche verificate sul campo (settembre 2026)
 - **RaiPlay**: le collezioni hanno due forme (`contents[].contents[]` e `blocks[].sets[].path_id` → ContentSet JSON): il parser le attraversa entrambe in modo ricorsivo.
 - **RaiPlay stream**: `/programmi/<slug>.json` → `first_item_path` → `/video/…json` → `video.content_url` (relinker) → `&output=71` = **playlist HLS m3u8**, con `Referer: https://www.raiplay.it` + **sottotitoli SRT italiani** da `subtitleList`.
-- **Internet Archive**: `advancedsearch.php` (query Lucene) → `metadata/<id>` → link fisici `https://<server><dir>/<file>` (solo MPEG4/H.264/Matroska/DivX; Theora escluso perché ExoPlayer non lo riproduce). Per i film singoli si usa l'estrattore interno `archive.org/details` di CloudStream (pattern del provider ufficiale).
+- **Internet Archive stream**: NON si usa l'estrattore interno `archive.org/details` di CloudStream (ha un selettore CSS malformato e lascia il player in caricamento infinito). Il plugin chiama `metadata/<id>` e costruisce **link diretti** `https://<server><dir>/<file>` (solo MPEG4/H.264/Matroska/DivX, nomi URL-encoded, niente Ogg/Theora né duplicati "IA"), con fallback su `/download/` e **sottotitoli .vtt** dell'item passati via `subtitleCallback`.
+- **Paginazione**: `getMainPage(page, request)` con `hasNext=true` per le righe dinamiche IA; `search(query, page)` sovrascritto con `SearchResponseList` per la ricerca a scroll infinito.
 - **Ricerca RaiPlay**: pagina SSR `ricerca.html?q=` (card con `data-info-url`/`data-video-json` + `aria-label`).
 
 ### Crediti e licenza
