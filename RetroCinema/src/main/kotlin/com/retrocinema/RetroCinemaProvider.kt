@@ -186,7 +186,7 @@ class RetroCinemaProvider : MainAPI() {
         var hasMore = false
         val list: List<SearchResponse> = try {
             when {
-                data.startsWith("local|") -> catalogRow(Catalogo.daVedere)
+                data.startsWith("local|") -> catalogRow(Catalogo.picks)
                 data.startsWith("cat|") -> catalogRow(catalogFor(data.removePrefix("cat|")))
                 data.startsWith("rai|") -> raiCollectionRow(data.removePrefix("rai|"), page)
                 data.startsWith("raimulti|") -> raiMultiRow(data.removePrefix("raimulti|"), page)
@@ -559,9 +559,9 @@ class RetroCinemaProvider : MainAPI() {
             }
         }.take(6)
 
-        val distinctVideos = videoFiles.distinctBy { getUniqueName(it.name ?: "") }
+        val uniqueNames = videoFiles.map { getUniqueName(it.name ?: "") }.distinct()
 
-        return if (distinctVideos.size <= 1) {
+        return if (uniqueNames.size <= 1) {
             // FILM SINGOLO: link DIRETTI costruiti dai metadata.
             // Non usiamo l'estrattore interno (ha un selettore CSS rotto e
             // lascia il player in caricamento all'infinito).
@@ -587,12 +587,10 @@ class RetroCinemaProvider : MainAPI() {
                 .groupBy { it }
                 .maxByOrNull { it.value.count() }?.key
 
-            val episodes: List<Episode> = distinctVideos.map { fileName ->
-                val files = videoFiles.filter {
-                    getUniqueName(it.name ?: "") == fileName
-                }
+            val episodes: List<Episode> = uniqueNames.map { uniName ->
+                val files = videoFiles.filter { getUniqueName(it.name ?: "") == uniName }
                 val file = files.first()
-                val cleanedName = (file.original ?: file.name ?: fileName)
+                val cleanedName = (file.original ?: file.name ?: uniName)
                     .substringAfterLast('/').substringBeforeLast('.').replace('_', ' ')
                 newEpisode(
                     LoadData(
