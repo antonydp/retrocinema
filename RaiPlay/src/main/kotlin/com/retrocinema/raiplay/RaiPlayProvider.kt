@@ -104,6 +104,10 @@ class RaiPlayProvider : MainAPI() {
     )
 
     // ---------- Utility ----------
+    // Absolutizza i percorsi relativi di RaiPlay (equivalente di fixUrl, ma locale)
+    private fun absUrl(u: String): String =
+        if (u.startsWith("http")) u else mainUrl.trimEnd('/') + (if (u.startsWith("/")) u else "/$u")
+
     private fun RaiImages.bestPoster(): String? =
         (portrait?.takeIf { it.isNotBlank() }) ?: (landscape?.takeIf { it.isNotBlank() })
 
@@ -135,7 +139,7 @@ class RaiPlayProvider : MainAPI() {
             if (path.endsWith("/")) path = path.dropLast(1)
             path += ".json"
         }
-        return if (path.startsWith("http")) path else fixUrl(path)
+        return if (path.startsWith("http")) path else absUrl(path)
     }
 
     private fun collectChildren(node: RaiNode): List<RaiNode> {
@@ -162,8 +166,8 @@ class RaiPlayProvider : MainAPI() {
     private fun RaiNode.toSearchResponse(): SearchResponse? {
         val n = name?.trim() ?: return null
         val pid = pathId ?: return@toSearchResponse null
-        return newMovieSearchResponse(n, fixUrl(pid), TvType.Movie) {
-            this.posterUrl = images?.bestPoster()?.let { fixUrl(it) }
+        return newMovieSearchResponse(n, absUrl(pid), TvType.Movie) {
+            this.posterUrl = images?.bestPoster()?.let { absUrl(it) }
             this.year = yearFromString(subtitle) ?: yearFromString(n)
         }
     }
@@ -184,9 +188,9 @@ class RaiPlayProvider : MainAPI() {
             when (request.data) {
                 "cult" -> curatedSlugsToItems(COMEDIE_ITALIANE)
                 "hollywood" -> curatedSlugsToItems(CLASSICI_HOLLYWOOD)
-                "stanlio" -> nodeToItems(fixUrl(STANLIO_COLLECTION), null, 14)
-                "top" -> nodeToItems(fixUrl(FILM_INDEX), TOP_FILMS_BLOCK, 14)
-                "teche" -> nodeToItems(fixUrl(TECHE_INDEX), null, 14)
+                "stanlio" -> nodeToItems(absUrl(STANLIO_COLLECTION), null, 14)
+                "top" -> nodeToItems(absUrl(FILM_INDEX), TOP_FILMS_BLOCK, 14)
+                "teche" -> nodeToItems(absUrl(TECHE_INDEX), null, 14)
                 else -> emptyList()
             }
         }
@@ -232,8 +236,8 @@ class RaiPlayProvider : MainAPI() {
                 .trim()
                 .takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val poster = card.selectFirst("img")?.attr("src")?.takeIf { it.isNotBlank() }
-            newMovieSearchResponse(title, fixUrl(infoUrl), TvType.Movie) {
-                this.posterUrl = poster?.let { fixUrl(it) }
+            newMovieSearchResponse(title, absUrl(infoUrl), TvType.Movie) {
+                this.posterUrl = poster?.let { absUrl(it) }
             }
         }
     }
@@ -250,7 +254,7 @@ class RaiPlayProvider : MainAPI() {
         val firstPath = node.firstItemPath
         if (firstPath != null) {
             val vNode = runCatching {
-                tryParseJson<RaiNode>(app.get(fixUrl(firstPath)).text)
+                tryParseJson<RaiNode>(app.get(absUrl(firstPath)).text)
             }.getOrNull()
             val contentUrl = vNode?.video?.contentUrl
             if (contentUrl != null) {
@@ -261,7 +265,7 @@ class RaiPlayProvider : MainAPI() {
                     contentUrl // loadLinks() riceverà l'URL del relinker
                 ) {
                     this.posterUrl = (vNode.images?.bestPoster() ?: node.images?.bestPoster())
-                        ?.let { fixUrl(it) }
+                        ?.let { absUrl(it) }
                     this.year = yearFromString(vNode.subtitle) ?: yearFromString(node.subtitle)
                         ?: yearFromString(title)
                     this.plot = (vNode.description ?: node.description)?.trim()
@@ -279,14 +283,14 @@ class RaiPlayProvider : MainAPI() {
 
         val episodes = children.mapNotNull { c ->
             val pid = c.pathId ?: return@mapNotNull null
-            newEpisode(fixUrl(pid)) {
-                this.name = c.name?.trim()
-                this.posterUrl = c.images?.bestPoster()?.let { fixUrl(it) }
+            newEpisode(absUrl(pid)) {
+                this.name = c.name?.trim().takeUnless { it.isNullOrEmpty() } ?: "Film"
+                this.posterUrl = c.images?.bestPoster()?.let { absUrl(it) }
             }
         }
 
         return newTvSeriesLoadResponse(title, jsonUrl, TvType.TvSeries, episodes) {
-            this.posterUrl = node.images?.bestPoster()?.let { fixUrl(it) }
+            this.posterUrl = node.images?.bestPoster()?.let { absUrl(it) }
             this.plot = node.description?.trim()
         }
     }
@@ -313,7 +317,7 @@ class RaiPlayProvider : MainAPI() {
                 val fip = node?.firstItemPath
                 if (fip != null) {
                     val vNode = runCatching {
-                        tryParseJson<RaiNode>(app.get(fixUrl(fip)).text)
+                        tryParseJson<RaiNode>(app.get(absUrl(fip)).text)
                     }.getOrNull()
                     streamUrl = vNode?.video?.contentUrl
                 }
