@@ -1,0 +1,25 @@
+[
+    {
+        "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/logo.png",
+        "fileHash": "sha256-2c5c515145be3c818441302c1107d24a59da94a297c2698b197e567857e418db",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/antonydp/retrocinema",
+        "fileSize": 90413,
+        "status": 1,
+        "language": "it",
+        "authors": [
+            "antonydp",
+            "Luna712",
+            "recloudstream",
+            "doGior"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 7,
+        "internalName": "RetroCinema",
+        "description": "TUTTO IN ITALIANO con SCROLL INFINITO ovunque. Nuove uscite ogni giorno (StreamingCommunity), 114+ classici italiani verificati uno a uno (Tot\u00f2, Sordi, Gassman, Fellini, De Sica), storie d'amore, film con i bambini e dal libro al film (RaiPlay: Cinema ragazzi, Dal libro al film, 25 anni Rai Cinema, film in esclusiva), Stanlio e Ollio, commedia all'italiana, melodrammi, comiche. Righe infinite per genere: commedie, drammi, romance, famiglia, avventura, animazione. Ricerca paginata. Niente horror, niente serie TV, solo film per la famiglia.",
+        "url": "https://raw.githubusercontent.com/antonydp/retrocinema/builds/RetroCinema.cs3",
+        "name": "RetroCinema"
+    }
+]
