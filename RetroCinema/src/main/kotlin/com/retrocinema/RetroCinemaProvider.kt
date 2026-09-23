@@ -38,12 +38,15 @@ import kotlin.math.roundToInt
  * RetroCinema — UN SOLO plugin che contiene tutto.
  *
  * Sorgenti (verificate dal vivo):
- *  - Catalogo ITALIANO curato (87+ film verificati uno a uno su Internet
+ *  - Catalogo ITALIANO curato (114+ film verificati uno a uno su Internet
  *    Archive, audio italiano garantito: solo film di origine italiana +
- *    comiche mute). Home con categorie italiane e scroll infinito locale.
+ *    comiche mute). Include STORIE D'AMORE, FILM CON I BAMBINI e film
+ *    degli anni '70-'90 (Fantozzi, Benigni...). Scroll infinito locale.
  *  - RaiPlay (ufficiale): collezioni curate "Stanlio e Ollio - Edizioni
  *    restaurate", "Grandi Classici di Hollywood" (doppiati in italiano),
- *    "Il grande cinema". Stream HLS ufficiale via relinker Rai + SRT.
+ *    "Il grande cinema" + RACCOLTE: Dal libro al film, Cinema ragazzi
+ *    (film con i bambini), 25 anni di Rai Cinema, Film in esclusiva
+ *    (nuove uscite), Storie d'amore. Stream HLS via relinker Rai + SRT.
  *
  * Il catalogo è SELEZIONATO: solo lungometraggi, solo classici adatti a
  * tutta la famiglia. Nessun horror, nessuna serie TV, niente contenuti adulti.
@@ -160,15 +163,23 @@ class RetroCinemaProvider : MainAPI() {
     // ------------------------------------------------------------------
     override val mainPage = mainPageOf(
         Pair("local|", "Da vedere assolutamente"),
+        Pair("cat|amore", "Storie d'amore"),
+        Pair("cat|bambini", "Film con i bambini"),
+        Pair("rairaccolta|https://www.raiplay.it/raccolta/Dal-libro-al-film-b490523c-0d87-4547-832f-c50a816bb5af.html", "Dal libro al film (RaiPlay)"),
+        Pair("rairaccolta|https://www.raiplay.it/raccolta/cinema-ragazzi-raiplay-c5b4990f-e51d-4fef-9276-a91693b02506.html", "Cinema ragazzi (RaiPlay)"),
         Pair("cat|toto", "Totò e i comici della risata"),
         Pair("cat|commedia", "Commedia all'italiana"),
         Pair("cat|autori", "Il grande cinema d'autore"),
         Pair("cat|neorealismo", "Neorealismo: l'Italia vera"),
         Pair("cat|melodramma", "Grandi melodrammi"),
-        Pair("cat|peplum", "Peplum e avventura antica"),
+        Pair("rairaccolta|https://www.raiplay.it/raccolta/Stefania-Sandrelli-una-lunga-storia-damore-1696ffa6-2a06-4bed-bfe9-1b950317924b.html", "Storie d'amore su RaiPlay"),
         Pair("rai|stanlioeollio-edizionirestaurate", "Stanlio e Ollio restaurati"),
         Pair("rai|grandiclassicidihollywood", "Grandi classici di Hollywood (italiano)"),
         Pair("raimulti|ilgrandecinema", "Il grande cinema su RaiPlay"),
+        Pair("cat|peplum", "Peplum e avventura antica"),
+        Pair("cat|recenti", "Anni '70-'90: da ricordare"),
+        Pair("rairaccolta|https://www.raiplay.it/raccolta/25-anni-con-Rai-Cinema-0a0a2784-043f-4b1e-8e94-3f2b4ba380ac.html", "25 anni di Rai Cinema (nuovi)"),
+        Pair("rairaccolta|https://www.raiplay.it/raccolta/film-in-esclusiva-9c2e6ef9-902b-4021-a4ab-bf5fbc671e2e.html", "Film in esclusiva (nuove uscite)"),
         Pair("cat|comiche", "Comiche senza parole"),
         Pair("always|", "Scopri film sempre nuovi")
     )
@@ -182,6 +193,7 @@ class RetroCinemaProvider : MainAPI() {
                 data.startsWith("cat|") -> catalogRow(catalogFor(data.removePrefix("cat|")))
                 data.startsWith("rai|") -> raiCollectionRow(data.removePrefix("rai|"), page)
                 data.startsWith("raimulti|") -> raiMultiRow(data.removePrefix("raimulti|"), page)
+                data.startsWith("rairaccolta|") -> raiRaccoltaRow(data.removePrefix("rairaccolta|"), page)
                 data.startsWith("always|") -> {
                     // scroll infinito SOLO sul catalogo verificato: zero rete,
                     // zero sorprese, tutti film italiani già controllati uno a uno
@@ -209,16 +221,31 @@ class RetroCinemaProvider : MainAPI() {
         "autori" -> Catalogo.autori
         "neorealismo" -> Catalogo.neorealismo
         "melodramma" -> Catalogo.melodramma
+        "amore" -> Catalogo.amore + byTitles(
+            listOf("Senso", "Poveri ma belli", "La ragazza con la valigia",
+                "Il sorpasso", "Matrimonio all'italiana", "Divorzio all'italiana")
+        )
+        "bambini" -> Catalogo.bambini + byTitles(
+            listOf("Sciuscià", "Ladri di biciclette", "Miracolo a Milano")
+        )
+        "recenti" -> Catalogo.recenti
         "peplum" -> Catalogo.peplum
         "musical" -> Catalogo.musical
         "comiche" -> Catalogo.comiche
         else -> emptyList()
     }
 
+    // Preleva film per titolo esatto da tutto il catalogo (per arricchire le righe)
+    private fun byTitles(titles: List<String>): List<FilmCatalogo> {
+        val all = catalogAll()
+        return titles.mapNotNull { t -> all.firstOrNull { it.titolo == t } }
+    }
+
     // Tutti i film del catalogo, deduplicati: alimenta lo scroll infinito
     private fun catalogAll(): List<FilmCatalogo> {
         val all = Catalogo.toto + Catalogo.commedia + Catalogo.autori +
-                Catalogo.neorealismo + Catalogo.melodramma + Catalogo.peplum +
+                Catalogo.neorealismo + Catalogo.melodramma + Catalogo.amore +
+                Catalogo.bambini + Catalogo.recenti + Catalogo.peplum +
                 Catalogo.musical + Catalogo.comiche
         return all.distinctBy { it.id }
     }
@@ -227,6 +254,7 @@ class RetroCinemaProvider : MainAPI() {
     private val picksTitles = listOf(
         "I soliti ignoti", "Ladri di biciclette", "Don Camillo",
         "Il ritorno di Don Camillo", "Fantozzi", "Il sorpasso",
+        "C'eravamo tanto amati", "Nuovo Cinema Paradiso", "Un americano a Roma",
         "La grande guerra", "Guardie e ladri", "L'oro di Napoli",
         "Riso amaro", "Pane, amore e fantasia", "Amici miei",
         "Amarcord", "La strada", "Miracolo a Milano", "Roma città aperta",
@@ -293,6 +321,41 @@ class RetroCinemaProvider : MainAPI() {
             }
         }
         return out.map { it.toSearch() }
+    }
+
+    // ---- Righe RaiPlay da RACCOLTE (pagine HTML SSR) ----
+    // Estrae SOLO i film (data-layout="single"): le serie TV hanno
+    // data-layout="multi" e vengono scartate. Cache in memoria per
+    // non rifare il fetch dell'HTML (~1 MB) a ogni apertura home.
+    private val raccoltaCache = mutableMapOf<String, List<RaiItem>>()
+
+    private suspend fun raiRaccoltaRow(url: String, page: Int): List<SearchResponse> {
+        if (page > 1) return emptyList()
+        val items = try {
+            raccoltaCache.getOrPut(url) {
+                val html = app.get(url).text
+                val out = mutableListOf<RaiItem>()
+                val seen = mutableSetOf<String>()
+                for (block in html.split("card-item cell").drop(1)) {
+                    if (!block.contains("data-layout=\"single\"")) continue
+                    val path = Regex("data-video-json=\"(/programmi/[^\"]+\\.json)\"")
+                        .find(block)?.groupValues?.get(1) ?: continue
+                    if (path in seen) continue
+                    val titleRaw = Regex("aria-label=\"maggiori informazioni su ([^\"]+)\"")
+                        .find(block)?.groupValues?.get(1) ?: continue
+                    val title = Jsoup.parse(titleRaw).text() // unescape &#x27; ecc.
+                    if (!isCleanTitle(title)) continue
+                    val poster = Regex("<img alt=\"[^\"]*\" src=\"([^\"]+)\"")
+                        .find(block)?.groupValues?.get(1)
+                    seen.add(path)
+                    out.add(RaiItem(title, path, poster?.let { "$mainUrl$it" }, null))
+                }
+                out
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return items.map { it.toSearch() }
     }
 
     private data class IA_SEARCH(val response: IA_DOCS? = null)

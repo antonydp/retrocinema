@@ -1,18 +1,20 @@
 package com.retrocinema
 
 /**
- * Catalogo ITALIANO curato e VERIFICATO (v5): ogni film di origine
+ * Catalogo ITALIANO curato e VERIFICATO (v6): ogni film di origine
  * italiana (audio garantito italiano; le comiche sono mute, nessuna
  * lingua parlata). Ogni item controllato 1-a-1 via API metadata di
  * Internet Archive: esiste, ha un file video riproducibile (MP4/H264),
  * durata da lungometraggio, nessun contenuto horror/adulto.
- * Generato da scripts/build_catalogo_italiano.py — non toccare a mano.
+ * v6: nuove categorie storie d'amore, film con i bambini, film recenti.
+ * Generato da scripts/build_round4.py — non toccare a mano.
  */
 data class FilmCatalogo(val titolo: String, val id: String, val anno: Int?, val minuti: Int)
 
 object Catalogo {
     val toto = listOf(
         FilmCatalogo("Totò e le donne", "toto-e-le-donne-film-completo-con-toto-e-peppino-de-filippo", 1952, 92),
+        FilmCatalogo("In nome della legge", "InNomeDellaLegge", 1949, 96),
         FilmCatalogo("Totò, Peppino e i fuorilegge", "toto-peppino-e-i-fuorilegge-film-completo", 1956, 98),
         FilmCatalogo("Dov'è la libertà?", "dove-la-liberta-toto-1954", 1954, 87),
         FilmCatalogo("Le streghe", "le-streghe-toto-1967", 1967, 106),
@@ -50,6 +52,9 @@ object Catalogo {
         FilmCatalogo("Il ritorno di Don Camillo", "il-ritorno-di-don-camillo-colorized-1953-720p", 1953, 111),
         FilmCatalogo("Don Camillo e l'onorevole Peppone", "don-camillo-e-l-onorevole-peppone-colorized-1955-720p", 1955, 100),
         FilmCatalogo("Matrimonio all'italiana", "matrimonio-all-italiana-1964", 1964, 102),
+        FilmCatalogo("Un americano a Roma", "un-americano-a-roma-steno-1954-b-n-640p-eng-hard-sub", 1954, 85),
+        FilmCatalogo("Signore e signori", "signore-e-signori-pietro-germi-1965-b-n-576p", 1965, 114),
+        FilmCatalogo("Una vita difficile", "una-vita-difficile-dino-risi-1961-b-n-576p", 1961, 113),
     )
 
     val autori = listOf(
@@ -71,11 +76,15 @@ object Catalogo {
         FilmCatalogo("La dolce vita", "1960-la-dolce-vita-720p-ac-3-ita-sub-eng-mircrew_202502", 1960, 176),
         FilmCatalogo("Il bidone", "il.-bidone.-1955.1080p.-blu-ray.x-264", 1955, 114),
         FilmCatalogo("Le notti di Cabiria", "nights-of-cabiria-fellini", 1957, 119),
-        FilmCatalogo("Bellissima", "bellissima_202106", 1951, 110),
+        FilmCatalogo("Bellissima", "bellissima_202106", 1952, 110),
+        FilmCatalogo("Rocco e i suoi fratelli", "rocco-e-i-suoi-fratelli-luchino-visconti-1960-b-n-720p", 1960, 170),
+        FilmCatalogo("Uccellacci e uccellini", "uccellacci-e-uccellini-pier-paolo-pasolini-1966-b-n-720p", 1966, 89),
+        FilmCatalogo("Il conformista", "il-conformista-bernardo-bertolucci-1970-color-720p", 1970, 113),
+        FilmCatalogo("Il caso Mattei", "il-caso-mattei-franceco-rosi-1972-color-480p", 1972, 110),
+        FilmCatalogo("I pugni in tasca", "i-pugni-in-tasca-marco-bellocchio-1965-b-n-540p", 1965, 108),
     )
 
     val neorealismo = listOf(
-        FilmCatalogo("In nome della legge", "InNomeDellaLegge", 1949, 96),
         FilmCatalogo("Ladri di biciclette", "ladri-di-biciclette-vittorio-de-sica-1948-b-n-720p", 1948, 89),
         FilmCatalogo("Roma città aperta", "roma-citta-aperta-roberto-rossellini-1945-b-n-720p", 1945, 103),
         FilmCatalogo("Miracolo a Milano", "miracolo-a-milano-vittorio-de-sica-1951-b-n-720p", 1951, 97),
@@ -95,6 +104,35 @@ object Catalogo {
         FilmCatalogo("Catene", "catene-raffaele-matarazzo-1949-b-n-480p", 1949, 95),
         FilmCatalogo("Città dolente", "citta-dolente-mario-bonnard-1949-b-n-480p", 1949, 99),
         FilmCatalogo("Tormento", "tormento_202103", 1950, 98),
+        FilmCatalogo("Una donna libera", "una-donna-libera-vittorio-cottafavi-1954-b-n-480p", 1954, 90),
+    )
+
+    val amore = listOf(
+        FilmCatalogo("C'eravamo tanto amati", "eravamo-tanto-amati-ettore-scola-1974-color-720p", 1974, 124),
+        FilmCatalogo("L'eclisse", "eclisse-michelangelo-antonioni-1962-b-n-720p", 1962, 126),
+        FilmCatalogo("Cronaca di un amore", "cronaca-di-un-amore-michelangelo-antonioni-1950-b-n-1080p", 1950, 103),
+        FilmCatalogo("Due soldi di speranza", "due-soldi-di-speranza-renato-castellani-1952-b-n-480p", 1952, 92),
+        FilmCatalogo("Domenica d'agosto", "domenica-di-agosto-luciano-emmer-1950-b-n-720p", 1950, 75),
+        FilmCatalogo("Leoni al sole", "61-leoni-al-sole-vittorio-caprioli-1961-color-1080p", 1961, 101),
+        FilmCatalogo("La spiaggia", "la-spiaggia-alberto-lattuada-1954-color-480p-eng-hard-sub", 1954, 98),
+        FilmCatalogo("Il grido", "il-grido-michelangelo-antonioni-1957-b-n-570p", 1957, 110),
+        FilmCatalogo("Febbre di vivere", "febbre-di-vivere-claudio-gora-1953-b-n-480p", 1953, 87),
+        FilmCatalogo("Nuovo Cinema Paradiso", "cinema-paradiso_202511", 1988, 174),
+    )
+
+    val bambini = listOf(
+        FilmCatalogo("Prima comunione", "prima-comunione-alessandro-blasetti-1950-b-n-720p", 1950, 82),
+        FilmCatalogo("Diario di un maestro (1/2)", "diario-di-un-maestro-tv-version-parte-1-2-vittorio-de-seta-1974", 1974, 136),
+        FilmCatalogo("Diario di un maestro (2/2)", "diario-di-un-maestro-tv-version-parte-2-2-vittorio-de-seta-1974", 1974, 132),
+        FilmCatalogo("L'uomo che piantava gli alberi", "uomochepiantavaglialberi_jeangiono_omeroantonutti", 1987, 30),
+    )
+
+    val recenti = listOf(
+        FilmCatalogo("Fantozzi", "fantozzi-luciano-salce-1975-color-720p", 1975, 103),
+        FilmCatalogo("Un borghese piccolo piccolo", "un-borghese-piccolo-piccolo-mario-monicelli-1977-color-360p", 1977, 117),
+        FilmCatalogo("Johnny Stecchino", "benigni_jhonny-stecchino", 1991, 116),
+        FilmCatalogo("Febbre da cavallo", "febbre.da.cavallo.-1976.-ita.-brrip.-720p.x-264-hd-4-me", 1976, 90),
+        FilmCatalogo("Il mostro", "il.-mostro-1994", 1994, 118),
     )
 
     val peplum = listOf(
@@ -109,7 +147,7 @@ object Catalogo {
     )
 
     val comiche = listOf(
-                FilmCatalogo("Cabiria", "cabiria-1913-1914-riedizione-2021-restored-remix", 1914, 157),
+        FilmCatalogo("Cabiria", "cabiria-1913-1914-riedizione-2021-restored-remix", 1914, 157),
         FilmCatalogo("L'Inferno", "silent-dantes-inferno", 1911, 67),
         FilmCatalogo("Charlie Chaplin Festival", "charlie_chaplin_film_fest", 1938, 77),
         FilmCatalogo("The General", "TheGeneral", 1927, 67),
