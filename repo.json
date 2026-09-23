@@ -1,6 +1,6 @@
 {
     "name": "RetroCinema",
-    "description": "Oltre 180 film classici verificati uno a uno: italiani (Fellini, De Sica, Sordi, Totò), Western, Film Noir, Musical, Comiche e i Grandi Classici su RaiPlay. Scroll infinito, tutto in un solo plugin, per tutta la famiglia.",
+    "description": "Oltre 300 film TUTTI IN ITALIANO verificati uno a uno: classici (Totò, Sordi, Gassman, Fellini, De Sica), storie d'amore, film con i bambini, film tratti da libri, comiche mute e film recenti fino alle nuove uscite su RaiPlay. Scroll infinito, un solo plugin, per tutta la famiglia.",
     "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/logo.png",
     "manifestVersion": 1,
     "pluginLists": [
