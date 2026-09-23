@@ -23,8 +23,6 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.Jsoup
@@ -150,14 +148,9 @@ class ScSession {
             try {
                 for (cand in candidates) {
                     try {
-                        val ok = withTimeoutOrNull(9_000) {
-                            try {
-                                app.get(cand).text.contains("id=\"app\"")
-                            } catch (_: Exception) {
-                                false
-                            }
-                        } ?: false
-                        if (ok) {
+                        // OkHttp ha già i suoi timeout: i domini morti
+                        // falliscono da soli, in modo pulito
+                        if (app.get(cand).text.contains("id=\"app\"")) {
                             root = cand
                             return cand
                         }
@@ -172,7 +165,7 @@ class ScSession {
             }
         } else {
             // un'altra coroutine sta risolvendo il dominio: attendi
-            while (root == null) delay(80)
+            while (root == null) Thread.sleep(80)
         }
         return root!!
     }
@@ -230,7 +223,7 @@ class ScSession {
                 preparingHeaders.set(false)
             }
         } else {
-            while (!headersReady) delay(80)
+            while (!headersReady) Thread.sleep(80)
         }
     }
 
