@@ -47,9 +47,18 @@ import kotlin.math.roundToInt
  *    "Il grande cinema" + RACCOLTE: Dal libro al film, Cinema ragazzi
  *    (film con i bambini), 25 anni di Rai Cinema, Film in esclusiva
  *    (nuove uscite), Storie d'amore. Stream HLS via relinker Rai + SRT.
+ *  - StreamingCommunity (fonte FMHY, via API Inertia paginata): NUOVE
+ *    USCITE, slider Top 10 / Tendenza / Aggiunti di recente e righe per
+ *    genere CON SCROLL INFINITO REALE (Commedia ~6.000 titoli, Dramma
+ *    ~8.000, Romance ~2.000, Famiglia ~1.700, Avventura, Animazione...).
+ *    Solo film, audio italiano, player VixCloud + fallback VixSrc.
  *
- * Il catalogo è SELEZIONATO: solo lungometraggi, solo classici adatti a
- * tutta la famiglia. Nessun horror, nessuna serie TV, niente contenuti adulti.
+ * SCROLL INFINITO DAVVERO OVUNQUE: ogni riga della home che ha contenuti
+ * paginati dichiara hasNext=true e fornisce la pagina successiva a ogni
+ * scroll (comportamento loadMore per-riga di CloudStream); la ricerca è
+ * paginata con SearchResponseList.
+ *
+ * Nessun horror, nessuna serie TV, niente contenuti adulti.
  */
 class RetroCinemaProvider : MainAPI() {
 
@@ -60,6 +69,10 @@ class RetroCinemaProvider : MainAPI() {
     override val hasMainPage = true
 
     private val iaUrl = "https://archive.org"
+
+    // Sessione StreamingCommunity (fonte FMHY) + estrattori VixCloud/VixSrc
+    private val sc = ScSession()
+    private val vix = ScVixExtractors()
 
     // Mapper difensivo per archive.org (come il provider ufficiale di
     // recloudstream: i metadata IA mescolano stringhe e liste).
@@ -142,11 +155,13 @@ class RetroCinemaProvider : MainAPI() {
     //  Dati passati da load() a loadLinks()
     // ------------------------------------------------------------------
     data class LoadData(
-        val src: String,                       // "iaplaylist" | "rai"
+        val src: String,                       // "iaplaylist" | "rai" | "sc"
         val id: String? = null,                // identifier archive.org (storico)
         val path: String? = null,              // path video json RaiPlay
         val urlData: Set<URLData>? = null,     // file IA (uno o più), link diretti
-        val subs: List<IaSub>? = null          // sottotitoli .vtt archive.org
+        val subs: List<IaSub>? = null,         // sottotitoli .vtt archive.org
+        val scUrl: String? = null,             // pagina iframe StreamingCommunity
+        val scTmdb: Int? = null                // tmdbId per il fallback VixSrc
     )
 
     data class IaSub(val url: String, val lang: String)
@@ -159,16 +174,21 @@ class RetroCinemaProvider : MainAPI() {
     )
 
     // ------------------------------------------------------------------
-    //  PAGINA PRINCIPALE — ricca, curata, TUTTA IN ITALIANO
+    //  PAGINA PRINCIPALE — ricca, curata, TUTTA IN ITALIANO,
+    //  con righe a scroll infinito reale (StreamingCommunity)
     // ------------------------------------------------------------------
     override val mainPage = mainPageOf(
         Pair("local|", "Da vedere assolutamente"),
+        Pair("sc|slider|latest", "Nuove uscite: appena aggiunte"),
         Pair("cat|amore", "Storie d'amore"),
+        Pair("sc|genre|15", "Storie d'amore: sempre nuove"),
         Pair("cat|bambini", "Film con i bambini"),
         Pair("rairaccolta|https://www.raiplay.it/raccolta/Dal-libro-al-film-b490523c-0d87-4547-832f-c50a816bb5af.html", "Dal libro al film (RaiPlay)"),
         Pair("rairaccolta|https://www.raiplay.it/raccolta/cinema-ragazzi-raiplay-c5b4990f-e51d-4fef-9276-a91693b02506.html", "Cinema ragazzi (RaiPlay)"),
+        Pair("sc|genre|16", "Film di famiglia: sempre nuovi"),
         Pair("cat|toto", "Totò e i comici della risata"),
         Pair("cat|commedia", "Commedia all'italiana"),
+        Pair("sc|genre|12", "Commedie moderne: sempre nuove"),
         Pair("cat|autori", "Il grande cinema d'autore"),
         Pair("cat|neorealismo", "Neorealismo: l'Italia vera"),
         Pair("cat|melodramma", "Grandi melodrammi"),
@@ -176,43 +196,90 @@ class RetroCinemaProvider : MainAPI() {
         Pair("rai|stanlioeollio-edizionirestaurate", "Stanlio e Ollio restaurati"),
         Pair("rai|grandiclassicidihollywood", "Grandi classici di Hollywood (italiano)"),
         Pair("raimulti|ilgrandecinema", "Il grande cinema su RaiPlay"),
+        Pair("sc|slider|top10", "Top 10 di oggi"),
+        Pair("sc|genre|1", "Grandi drammi: sempre nuovi"),
+        Pair("sc|genre|11", "Avventure: sempre nuove"),
+        Pair("sc|genre|19", "Animazione: sempre nuova"),
         Pair("cat|peplum", "Peplum e avventura antica"),
         Pair("cat|recenti", "Anni '70-'90: da ricordare"),
+        Pair("cat|comiche", "Comiche senza parole"),
         Pair("rairaccolta|https://www.raiplay.it/raccolta/25-anni-con-Rai-Cinema-0a0a2784-043f-4b1e-8e94-3f2b4ba380ac.html", "25 anni di Rai Cinema (nuovi)"),
         Pair("rairaccolta|https://www.raiplay.it/raccolta/film-in-esclusiva-9c2e6ef9-902b-4021-a4ab-bf5fbc671e2e.html", "Film in esclusiva (nuove uscite)"),
-        Pair("cat|comiche", "Comiche senza parole"),
         Pair("always|", "Scopri film sempre nuovi")
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val data = request.data ?: ""
-        var hasMore = false
-        val list: List<SearchResponse> = try {
+        // Ogni ramo restituisce (items, hasMore): se hasMore=true, CloudStream
+        // ricarica la stessa riga con pagina+1 e CONCATENA gli item: è così
+        // che funziona lo scroll infinito per riga.
+        val result: Pair<List<SearchResponse>, Boolean> = try {
             when {
-                data.startsWith("local|") -> catalogRow(picks())
-                data.startsWith("cat|") -> catalogRow(catalogFor(data.removePrefix("cat|")))
-                data.startsWith("rai|") -> raiCollectionRow(data.removePrefix("rai|"), page)
-                data.startsWith("raimulti|") -> raiMultiRow(data.removePrefix("raimulti|"), page)
-                data.startsWith("rairaccolta|") -> raiRaccoltaRow(data.removePrefix("rairaccolta|"), page)
+                data.startsWith("local|") -> catalogRow(picks()) to false
+                data.startsWith("cat|") -> catalogRow(catalogFor(data.removePrefix("cat|"))) to false
+                data.startsWith("rai|") -> raiCollectionRow(data.removePrefix("rai|"), page) to false
+                data.startsWith("raimulti|") -> raiMultiRow(data.removePrefix("raimulti|"), page) to false
+                data.startsWith("rairaccolta|") -> raiRaccoltaRow(data.removePrefix("rairaccolta|"), page) to false
+                data.startsWith("sc|") -> {
+                    val parts = data.split("|")
+                    when (parts.getOrNull(1)) {
+                        "slider" -> scSliderRow(parts.getOrNull(2) ?: "latest")
+                        "genre" -> scGenreRow(parts.getOrNull(2)?.toIntOrNull() ?: -1, page)
+                        else -> emptyList<SearchResponse>() to false
+                    }
+                }
                 data.startsWith("always|") -> {
                     // scroll infinito SOLO sul catalogo verificato: zero rete,
                     // zero sorprese, tutti film italiani già controllati uno a uno
                     val all = catalogAll()
                     val from = (page - 1) * 24
-                    hasMore = from + 24 < all.size
-                    catalogRow(all.drop(from).take(24))
+                    val more = from + 24 < all.size
+                    catalogRow(all.drop(from).take(24)) to more
                 }
-                else -> emptyList()
+                else -> emptyList<SearchResponse>() to false
             }
         } catch (_: Exception) {
-            emptyList() // una riga che fallisce non deve rompere la home
+            emptyList<SearchResponse>() to false // una riga che fallisce non rompe la home
         }
+        val (list, hasMore) = result
         return newHomePageResponse(
             listOf(
                 HomePageList(request.name ?: name, list, true) // righe orizzontali stile Netflix
             ),
             hasNext = hasMore && list.isNotEmpty()
         )
+    }
+
+    // ------------------------------------------------------------------
+    //  Righe StreamingCommunity (SOLO FILM)
+    // ------------------------------------------------------------------
+
+    /** Converte un titolo StreamingCommunity in SearchResponse (SOLO FILM). */
+    private fun ScTitle.toSearch(): SearchResponse? {
+        if (type != "movie" || id == 0 || name.isBlank()) return null
+        val poster = images.firstOrNull { it.type == "poster" }?.filename
+        return newMovieSearchResponse(name, sc.titleUrl(this), TvType.Movie) {
+            if (!poster.isNullOrBlank()) this.posterUrl = "${sc.cdnRoot()}/images/$poster"
+        }
+    }
+
+    private fun scMovies(list: List<ScTitle>): List<SearchResponse> =
+        list.mapNotNull { it.toSearch() }.distinctBy { it.url }
+
+    /** Riga per genere con VERO scroll infinito: paginator current/last. */
+    private suspend fun scGenreRow(genreId: Int, page: Int): Pair<List<SearchResponse>, Boolean> {
+        if (genreId <= 0 || page < 1 || page > 60) return emptyList<SearchResponse>() to false
+        val paginator = sc.archivePage(genreId, page) ?: return emptyList<SearchResponse>() to false
+        val items = scMovies(paginator.data)
+        val more = items.isNotEmpty() &&
+                paginator.current_page < paginator.last_page
+        return items to more
+    }
+
+    /** Riga slider (latest/top10/trending): lista singola, finita. */
+    private suspend fun scSliderRow(name: String): Pair<List<SearchResponse>, Boolean> {
+        val slider = sc.slider(name) ?: return emptyList<SearchResponse>() to false
+        return scMovies(slider.titles) to false
     }
 
     private fun catalogFor(key: String): List<FilmCatalogo> = when (key) {
@@ -407,7 +474,21 @@ class RetroCinemaProvider : MainAPI() {
             }
         }
 
-        // 2) Internet Archive, paginato (film del dominio pubblico)
+        // 2) StreamingCommunity (fonte FMHY): paginator reale con last_page,
+        //    SOLO FILM — nuove uscite e tutto il catalogo in italiano
+        var scMore = false
+        try {
+            val pg = sc.searchPage(q, page)
+            if (pg != null) {
+                val items = scMovies(pg.data)
+                out.addAll(items)
+                scMore = items.isNotEmpty() && pg.current_page < pg.last_page
+            }
+        } catch (_: Exception) {
+        }
+
+        // 3) Internet Archive, paginato (film del dominio pubblico)
+        var iaMore = false
         try {
             val iaQuery = "mediatype:(movies) AND NOT subject:(horror) AND (title:($q) OR creator:($q))"
             val url = "$iaUrl/advancedsearch.php" +
@@ -417,13 +498,14 @@ class RetroCinemaProvider : MainAPI() {
             val res = tryParseJson<IA_SEARCH>(app.get(url).text)
             val docs = res?.response?.docs.orEmpty()
             out.addAll(docs.mapNotNull { it.toSearch() }.filter { isCleanTitle(it.name) })
-            hasMore = docs.size >= 20
+            iaMore = docs.size >= 20
         } catch (_: Exception) {
         }
 
         // Nota: la ricerca di RaiPlay lato HTML è stata dismessa (SPA), quindi
         // il catalogo RaiPlay resta raggiungibile dalle righe della home.
 
+        hasMore = scMore || iaMore
         return newSearchResponseList(out.distinctBy { it.url }, hasMore)
     }
 
@@ -518,13 +600,15 @@ class RetroCinemaProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    //  PAGINA DEL FILM — instrada su RaiPlay o Internet Archive
+    //  PAGINA DEL FILM — instrada su RaiPlay, Internet Archive o
+    //  StreamingCommunity
     // ------------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         return when {
             url.contains("archive.org/details/") -> loadInternetArchive(url)
             url.startsWith("$mainUrl/programmi/") -> loadRaiProgram(url)
             url.startsWith("$mainUrl/video/") -> loadRaiVideo(url)
+            url.contains("/titles/") -> loadStreamingCommunity(url)
             else -> throw ErrorLoadingException("URL non riconosciuto: $url")
         }
     }
@@ -772,6 +856,45 @@ class RetroCinemaProvider : MainAPI() {
         return null
     }
 
+    // ---- StreamingCommunity: scheda titolo (API Inertia, SOLO FILM) ----
+    private suspend fun loadStreamingCommunity(url: String): LoadResponse {
+        val inertia = sc.loadTitle(url)
+            ?: throw ErrorLoadingException("StreamingCommunity non raggiungibile")
+        val t = inertia.props.title
+            ?: throw ErrorLoadingException("Titolo non disponibile")
+        if (t.type != "movie") {
+            throw ErrorLoadingException("Questo è una serie TV: RetroCinema ha solo film")
+        }
+
+        val cdn = inertia.props.cdn_url?.takeIf { it.isNotBlank() } ?: sc.cdnRoot()
+        val poster = t.images.firstOrNull { it.type == "poster" }?.filename
+        val bg = t.images.firstOrNull { it.type == "background" }?.filename
+        val year = t.release_date?.take(4)?.toIntOrNull()?.takeIf { it in 1880..2030 }
+        val tags = t.genres.map { g ->
+            g.name.lowercase().replaceFirstChar { c -> c.uppercase() }
+        }.filter { it.isNotBlank() }.take(6)
+
+        val iframeUrl = "${sc.ensureRoot()}it/iframe/${t.id}&canPlayFHD=1"
+        val recommendations = inertia.props.sliders?.firstOrNull()?.titles
+            ?.let { scMovies(it) }?.take(16)
+
+        return newMovieLoadResponse(
+            t.name, url, TvType.Movie,
+            LoadData(src = "sc", scUrl = iframeUrl, scTmdb = t.tmdb_id)
+        ) {
+            this.plot = t.plot
+            this.year = year
+            t.runtime?.let { if (it > 0) this.duration = it }
+            if (!poster.isNullOrBlank()) this.posterUrl = "$cdn/images/$poster"
+            if (!bg.isNullOrBlank()) this.backgroundPosterUrl = "$cdn/images/$bg"
+            if (tags.isNotEmpty()) this.tags = tags
+            this.actors = t.main_actors?.take(8)?.map { a ->
+                ActorData(Actor(a.name, ""), roleString = "Interpreti")
+            }
+            this.recommendations = recommendations
+        }
+    }
+
     // ------------------------------------------------------------------
     //  LINK VIDEO — il cuore del plugin
     // ------------------------------------------------------------------
@@ -856,6 +979,40 @@ class RetroCinemaProvider : MainAPI() {
                     }
                 }
                 true
+            }
+
+            // ---------- StreamingCommunity: VixCloud + fallback VixSrc ----------
+            "sc" -> {
+                val pageUrl = load.scUrl ?: return false
+                var found = false
+                // 1) Player VixCloud di StreamingCommunity (Cloudflare
+                //    bypassato in app da CloudflareKiller)
+                try {
+                    val doc = app.get(
+                        pageUrl,
+                        headers = mapOf(
+                            "Referer" to sc.ensureRoot(),
+                            "User-Agent" to SC_UA
+                        )
+                    ).document
+                    val src = doc.select("iframe").firstOrNull()?.attr("src")
+                    if (!src.isNullOrBlank()) {
+                        found = vix.vixCloud(src, sc.ensureRoot(), callback, subtitleCallback) || found
+                    }
+                } catch (_: Exception) {
+                }
+                // 2) Fallback VixSrc via tmdbId (dominio separato)
+                val tmdb = load.scTmdb
+                if (tmdb != null && tmdb > 0) {
+                    try {
+                        found = vix.vixSrc(
+                            "https://vixsrc.to/movie/$tmdb", "https://vixsrc.to/",
+                            callback, subtitleCallback
+                        ) || found
+                    } catch (_: Exception) {
+                    }
+                }
+                found
             }
 
             else -> false
