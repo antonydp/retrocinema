@@ -23,8 +23,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -125,8 +124,8 @@ class ScSession {
         )
     }
 
-    private val rootMutex = Mutex()
-    private val headerMutex = Mutex()
+    private val resolvingRoot = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val preparingHeaders = java.util.concurrent.atomic.AtomicBoolean(false)
 
     @Volatile
     var root: String? = null
@@ -147,27 +146,33 @@ class ScSession {
     /** Radice corrente (con slash finale); risolve il dominio al primo uso. */
     suspend fun ensureRoot(): String {
         root?.let { return it }
-        rootMutex.withLock {
-            root?.let { return it }
-            for (cand in candidates) {
-                try {
-                    val ok = withTimeoutOrNull(9_000) {
-                        try {
-                            app.get(cand).text.contains("id=\"app\"")
-                        } catch (_: Exception) {
-                            false
+        if (resolvingRoot.compareAndSet(false, true)) {
+            try {
+                for (cand in candidates) {
+                    try {
+                        val ok = withTimeoutOrNull(9_000) {
+                            try {
+                                app.get(cand).text.contains("id=\"app\"")
+                            } catch (_: Exception) {
+                                false
+                            }
+                        } ?: false
+                        if (ok) {
+                            root = cand
+                            return cand
                         }
-                    } ?: false
-                    if (ok) {
-                        root = cand
-                        return cand
+                    } catch (_: Exception) {
                     }
-                } catch (_: Exception) {
                 }
+                // nessun dominio risponde: usa il default, le righe falliranno
+                // in modo pulito senza rompere la home
+                root = candidates[0]
+            } finally {
+                resolvingRoot.set(false)
             }
-            // nessun dominio risponde: usa il default, le righe falliranno
-            // in modo pulito senza rompere la home
-            root = candidates[0]
+        } else {
+            // un'altra coroutine sta risolvendo il dominio: attendi
+            while (root == null) delay(80)
         }
         return root!!
     }
@@ -189,37 +194,43 @@ class ScSession {
 
     private suspend fun setupHeaders() {
         if (headersReady) return
-        headerMutex.withLock {
-            if (headersReady) return@withLock
-            ensureRoot()
-            val r = root ?: return@withLock
-            val home = app.get("${r}it/archive")
-            val dataPage = home.document.select("#app").attr("data-page")
-            inertiaVersion = Regex("\"version\":\"([^\"]+)\"")
-                .find(dataPage)?.groupValues?.get(1) ?: ""
-
-            val jar = linkedMapOf<String, String>()
-            home.cookies.forEach { (k, v) -> jar[k] = v }
+        if (preparingHeaders.compareAndSet(false, true)) {
             try {
-                val csrf = app.get(
-                    "${r}sanctum/csrf-cookie",
-                    headers = mapOf(
-                        "Referer" to "${r}it/",
-                        "X-Requested-With" to "XMLHttpRequest"
-                    )
-                )
-                csrf.cookies.forEach { (k, v) -> jar[k] = v }
-            } catch (_: Exception) {
-            }
-            cookieHeader = jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            xsrf = jar["XSRF-TOKEN"]?.let {
+                ensureRoot()
+                val r = root
+                if (r == null) return
+                val home = app.get("${r}it/archive")
+                val dataPage = home.document.select("#app").attr("data-page")
+                inertiaVersion = Regex("\"version\":\"([^\"]+)\"")
+                    .find(dataPage)?.groupValues?.get(1) ?: ""
+
+                val jar = linkedMapOf<String, String>()
+                home.cookies.forEach { (k, v) -> jar[k] = v }
                 try {
-                    URLDecoder.decode(it, "UTF-8")
+                    val csrf = app.get(
+                        "${r}sanctum/csrf-cookie",
+                        headers = mapOf(
+                            "Referer" to "${r}it/",
+                            "X-Requested-With" to "XMLHttpRequest"
+                        )
+                    )
+                    csrf.cookies.forEach { (k, v) -> jar[k] = v }
                 } catch (_: Exception) {
-                    it
                 }
-            } ?: ""
-            headersReady = true
+                cookieHeader = jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                xsrf = jar["XSRF-TOKEN"]?.let {
+                    try {
+                        URLDecoder.decode(it, "UTF-8")
+                    } catch (_: Exception) {
+                        it
+                    }
+                } ?: ""
+                headersReady = true
+            } finally {
+                preparingHeaders.set(false)
+            }
+        } else {
+            while (!headersReady) delay(80)
         }
     }
 
