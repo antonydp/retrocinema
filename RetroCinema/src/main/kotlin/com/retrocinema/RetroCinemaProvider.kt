@@ -38,11 +38,12 @@ import kotlin.math.roundToInt
  * RetroCinema — UN SOLO plugin che contiene tutto.
  *
  * Sorgenti (verificate dal vivo):
- *  - RaiPlay (ufficiale): collezioni curate "Grandi Classici di Hollywood",
- *    "Stanlio e Ollio - Edizioni restaurate", "Il grande cinema". Stream HLS
- *    ufficiale via relinker Rai + sottotitoli italiani SRT.
- *  - Internet Archive: migliaia di film classici del dominio pubblico con
- *    download diretto, righe curate per genere e decennio.
+ *  - Catalogo ITALIANO curato (87+ film verificati uno a uno su Internet
+ *    Archive, audio italiano garantito: solo film di origine italiana +
+ *    comiche mute). Home con categorie italiane e scroll infinito locale.
+ *  - RaiPlay (ufficiale): collezioni curate "Stanlio e Ollio - Edizioni
+ *    restaurate", "Grandi Classici di Hollywood" (doppiati in italiano),
+ *    "Il grande cinema". Stream HLS ufficiale via relinker Rai + SRT.
  *
  * Il catalogo è SELEZIONATO: solo lungometraggi, solo classici adatti a
  * tutta la famiglia. Nessun horror, nessuna serie TV, niente contenuti adulti.
@@ -155,30 +156,21 @@ class RetroCinemaProvider : MainAPI() {
     )
 
     // ------------------------------------------------------------------
-    //  PAGINA PRINCIPALE — ricca, curata, in italiano
+    //  PAGINA PRINCIPALE — ricca, curata, TUTTA IN ITALIANO
     // ------------------------------------------------------------------
-    private fun iaQ(extra: String): String {
-        val base = "collection:(feature_films) AND mediatype:(movies) AND NOT subject:(horror)"
-        return if (extra.isBlank()) base else "$base AND ($extra)"
-    }
-
-    private val decadeFilter = "AND NOT title:(dracula OR frankenstein OR zombie OR monster)"
-
     override val mainPage = mainPageOf(
         Pair("local|", "Da vedere assolutamente"),
-        Pair("cat|italiani", "Grandi film italiani"),
-        Pair("rai|grandiclassicidihollywood", "Grandi Classici di Hollywood"),
+        Pair("cat|toto", "Totò e i comici della risata"),
+        Pair("cat|commedia", "Commedia all'italiana"),
+        Pair("cat|autori", "Il grande cinema d'autore"),
+        Pair("cat|neorealismo", "Neorealismo: l'Italia vera"),
+        Pair("cat|melodramma", "Grandi melodrammi"),
+        Pair("cat|peplum", "Peplum e avventura antica"),
         Pair("rai|stanlioeollio-edizionirestaurate", "Stanlio e Ollio restaurati"),
-        Pair("cat|comiche", "Comiche: Chaplin, Keaton e Stanlio e Ollio"),
-        Pair("cat|western", "Western"),
-        Pair("cat|noir", "Film Noir e Gangster"),
-        Pair("cat|musical", "Musical"),
-        Pair("cat|avventura", "Avventura e Grande Storia"),
+        Pair("rai|grandiclassicidihollywood", "Grandi classici di Hollywood (italiano)"),
         Pair("raimulti|ilgrandecinema", "Il grande cinema su RaiPlay"),
-        Pair("ia|" + iaQ("year:[1940 TO 1949] $decadeFilter"), "Anni '40"),
-        Pair("ia|" + iaQ("year:[1950 TO 1959] $decadeFilter"), "Anni '50"),
-        Pair("ia|" + iaQ("year:[1960 TO 1969] $decadeFilter"), "Anni '60"),
-        Pair("ia|", "Scopri film sempre nuovi")
+        Pair("cat|comiche", "Comiche senza parole"),
+        Pair("always|", "Scopri film sempre nuovi")
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -186,13 +178,17 @@ class RetroCinemaProvider : MainAPI() {
         var hasMore = false
         val list: List<SearchResponse> = try {
             when {
-                data.startsWith("local|") -> catalogRow(Catalogo.picks)
+                data.startsWith("local|") -> catalogRow(picks())
                 data.startsWith("cat|") -> catalogRow(catalogFor(data.removePrefix("cat|")))
                 data.startsWith("rai|") -> raiCollectionRow(data.removePrefix("rai|"), page)
                 data.startsWith("raimulti|") -> raiMultiRow(data.removePrefix("raimulti|"), page)
-                data.startsWith("ia|") -> {
-                    hasMore = page < 8
-                    iaSearchRow(data.removePrefix("ia|"), page)
+                data.startsWith("always|") -> {
+                    // scroll infinito SOLO sul catalogo verificato: zero rete,
+                    // zero sorprese, tutti film italiani già controllati uno a uno
+                    val all = catalogAll()
+                    val from = (page - 1) * 24
+                    hasMore = from + 24 < all.size
+                    catalogRow(all.drop(from).take(24))
                 }
                 else -> emptyList()
             }
@@ -208,13 +204,51 @@ class RetroCinemaProvider : MainAPI() {
     }
 
     private fun catalogFor(key: String): List<FilmCatalogo> = when (key) {
-        "italiani" -> Catalogo.italiani
-        "western" -> Catalogo.western
-        "noir" -> Catalogo.noir
+        "toto" -> Catalogo.toto
+        "commedia" -> Catalogo.commedia
+        "autori" -> Catalogo.autori
+        "neorealismo" -> Catalogo.neorealismo
+        "melodramma" -> Catalogo.melodramma
+        "peplum" -> Catalogo.peplum
         "musical" -> Catalogo.musical
-        "avventura" -> Catalogo.avventura
         "comiche" -> Catalogo.comiche
         else -> emptyList()
+    }
+
+    // Tutti i film del catalogo, deduplicati: alimenta lo scroll infinito
+    private fun catalogAll(): List<FilmCatalogo> {
+        val all = Catalogo.toto + Catalogo.commedia + Catalogo.autori +
+                Catalogo.neorealismo + Catalogo.melodramma + Catalogo.peplum +
+                Catalogo.musical + Catalogo.comiche
+        return all.distinctBy { it.id }
+    }
+
+    // I grandi titoli da mettere in cima alla home (risolti dal catalogo)
+    private val picksTitles = listOf(
+        "I soliti ignoti", "Ladri di biciclette", "Don Camillo",
+        "Il ritorno di Don Camillo", "Fantozzi", "Il sorpasso",
+        "La grande guerra", "Guardie e ladri", "L'oro di Napoli",
+        "Riso amaro", "Pane, amore e fantasia", "Amici miei",
+        "Amarcord", "La strada", "Miracolo a Milano", "Roma città aperta",
+        "Le notti di Cabiria", "Totò a colori"
+    )
+
+    private fun picks(): List<FilmCatalogo> {
+        val all = catalogAll()
+        val chosen = picksTitles.mapNotNull { t -> all.firstOrNull { it.titolo == t } }.toMutableList()
+        // se qualche titolo manca, completa con gli altri film del catalogo
+        for (f in all) {
+            if (chosen.size >= 16) break
+            if (chosen.none { it.id == f.id }) chosen.add(f)
+        }
+        return chosen.take(16)
+    }
+
+    // Normalizza per confronto titoli: minuscole, niente accenti/apostrofi
+    private fun normalizeForSearch(s: String): String {
+        val simplified = java.text.Normalizer.normalize(s.lowercase(), java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+        return simplified.replace(Regex("[^a-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
     }
 
     // Riga dal catalogo verificato: istantanea, zero richieste di rete
@@ -225,18 +259,6 @@ class RetroCinemaProvider : MainAPI() {
                 this.year = f.anno
             }
         }
-    }
-
-    // ---- Righe Internet Archive (query dinamiche, ordinate per popolarità) ----
-    private suspend fun iaSearchRow(query: String, page: Int): List<SearchResponse> {
-        val url = "$iaUrl/advancedsearch.php" +
-                "?q=" + java.net.URLEncoder.encode(query, "UTF-8") +
-                "&fl%5B%5D=identifier&fl%5B%5D=title&fl%5B%5D=year" +
-                "&sort%5B%5D=downloads+desc&rows=24&page=$page&output=json"
-        val res = tryParseJson<IA_SEARCH>(app.get(url).text)
-            ?: return emptyList()
-        return res.response?.docs.orEmpty().mapNotNull { it.toSearch() }
-            .filter { isCleanTitle(it.name) }
     }
 
     // ---- Righe RaiPlay da collezioni verificate ----
@@ -305,7 +327,24 @@ class RetroCinemaProvider : MainAPI() {
         val out = mutableListOf<SearchResponse>()
         var hasMore = false
 
-        // 1) Internet Archive, paginato (film del dominio pubblico)
+        // 1) Catalogo locale curato: istantaneo, titoli italiani puliti,
+        //    film già verificati. Esce per primo nei risultati.
+        val qn = normalizeForSearch(q)
+        if (qn.isNotBlank()) {
+            for (f in catalogAll()) {
+                val tn = normalizeForSearch(f.titolo)
+                if (tn.contains(qn) || qn.contains(tn)) {
+                    out.add(
+                        newMovieSearchResponse(f.titolo, "$iaUrl/details/${f.id}", TvType.Movie) {
+                            this.posterUrl = "$iaUrl/services/img/${f.id}"
+                            this.year = f.anno
+                        }
+                    )
+                }
+            }
+        }
+
+        // 2) Internet Archive, paginato (film del dominio pubblico)
         try {
             val iaQuery = "mediatype:(movies) AND NOT subject:(horror) AND (title:($q) OR creator:($q))"
             val url = "$iaUrl/advancedsearch.php" +
@@ -319,34 +358,8 @@ class RetroCinemaProvider : MainAPI() {
         } catch (_: Exception) {
         }
 
-        // 2) RaiPlay (classici disponibili in italiano) — solo prima pagina
-        if (page == 1) {
-            try {
-                val html = app.get(
-                    "$mainUrl/ricerca.html?q=" + java.net.URLEncoder.encode(q, "UTF-8")
-                ).text
-                val doc = Jsoup.parse(html)
-                val seen = mutableSetOf<String>()
-                for (a in doc.select("a[data-info-url], a[data-video-json]")) {
-                    val rawPath = a.attr("data-info-url").ifBlank { a.attr("data-video-json") }
-                    if (!rawPath.startsWith("/programmi/") && !rawPath.startsWith("/video/")) continue
-                    if (!rawPath.endsWith(".json")) continue
-                    val title = a.attr("aria-label")
-                        .removePrefix("maggiori informazioni su ")
-                        .ifBlank { a.selectFirst("img")?.attr("alt").orEmpty() }
-                    if (title.isBlank()) continue
-                    if (rawPath in seen) continue
-                    seen.add(rawPath)
-                    val img = a.selectFirst("img")?.attr("abs:src").orEmpty()
-                    out.add(
-                        newMovieSearchResponse(title, "$mainUrl$rawPath", TvType.Movie) {
-                            if (img.isNotBlank()) this.posterUrl = img
-                        }
-                    )
-                }
-            } catch (_: Exception) {
-            }
-        }
+        // Nota: la ricerca di RaiPlay lato HTML è stata dismessa (SPA), quindi
+        // il catalogo RaiPlay resta raggiungibile dalle righe della home.
 
         return newSearchResponseList(out.distinctBy { it.url }, hasMore)
     }

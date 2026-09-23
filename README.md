@@ -4,12 +4,13 @@
 
 # RetroCinema 🎞️
 
-**Il cinema di una volta, in UN SOLO plugin.** Estensione [CloudStream](https://github.com/recloudstream/cloudstream) curata per chi ama i film classici: commedie all'italiana, musical, western, film noir e capolavori — **tutto gratuito, legale, senza pubblicità e semplice da usare**.
+**Il cinema di una volta, TUTTO IN ITALIANO, in UN SOLO plugin.** Estensione [CloudStream](https://github.com/recloudstream/cloudstream) curata per chi ama i film classici: Totò, Sordi, Gassman, Fellini, De Sica, Monicelli, neorealismo, melodrammi, peplum, comiche e i Grandi Classici su RaiPlay — **tutto gratuito, legale, senza pubblicità e semplice da usare**.
 
 Un solo plugin da installare, una sola home piena di film: le righe scorrono come le file di poster di Netflix, senza dover cercare niente.
 
+> ✅ **Tutti i film parlano ITALIANO** (o sono mute): ogni film del catalogo è di origine italiana, con audio italiano garantito.
 > ✅ **Contenuti selezionati a mano** — solo lungometraggi adatti a tutta la famiglia.
-> ❌ **Niente horror, niente serie TV, niente contenuti adulti.**
+> ❌ **Niente film in inglese, niente horror, niente serie TV, niente contenuti adulti.**
 
 ---
 
@@ -40,26 +41,26 @@ Tocca il nome del fornitore in alto sulla home (o il pulsante delle categorie), 
 
 ---
 
-## 🏠 Cosa trovi in Home (14 righe curate + scroll infinito)
+## 🏠 Cosa trovi in Home (12 righe curate + scroll infinito)
 
 | Riga | Contenuto |
 |---|---|
-| **Da vedere assolutamente** | I 16 migliori film del catalogo verificato: Amarcord, La ciociara, Boccaccio '70, La grande guerra… |
-| **Grandi film italiani** | 30 capolavori verificati: Fellini, De Sica, Visconti, Monicelli, Sordi, Totò, Gassman |
-| **Grandi Classici di Hollywood** | Su RaiPlay: Gilda, La signora del venerdì, Da qui all'eternità, Funny Girl… |
-| **Stanlio e Ollio restaurati** | 26 film della coppia più amata, restaurati e in italiano |
-| **Comiche: Chaplin, Keaton e Stanlio e Ollio** | I capolavori del cinema muto che fanno ridere tutti |
-| **Western** | 30 film verificati: John Wayne, duelli all'alba e grandi spazi |
-| **Film Noir e Gangster** | 30 film verificati: detective, femme fatale e gangster anni '40–'50 |
-| **Musical** | 30 film verificati: Astaire, Garland, Gene Kelly, Bing Crosby |
-| **Avventura e Grande Storia** | Tarzan, Il libro della giungla, avventure d'altri tempi |
+| **Da vedere assolutamente** | I 16 migliori titoli: I soliti ignoti, Ladri di biciclette, Don Camillo, Il sorpasso, Fantozzi, La grande guerra… |
+| **Totò e i comici della risata** | Totò e le donne, Totò a colori, Dov'è la libertà?, Le fanatiche, Risate di gioia… |
+| **Commedia all'italiana** | Sordi, Gassman, Manfredi, Monicelli, Risi, Germi, Comencini: Guardie e ladri, Divorzio all'italiana, Amici miei, Brancaleone, Don Camillo… |
+| **Il grande cinema d'autore** | Fellini (Otto e mezzo, Amarcord, La strada, La dolce vita), Visconti (Senso, Rocco), Scola, Antonioni… |
+| **Neorealismo: l'Italia vera** | Roma città aperta, Paisà, Sciuscià, Umberto D., Miracolo a Milano, Riso amaro, In nome della legge… |
+| **Grandi melodrammi** | I lacrimogeni di Matarazzo: Catene, Tormento, Città dolente |
+| **Peplum e avventura antica** | Maciste, Ercole alla conquista di Atlantide, Ercole e la regina di Lidia, Il colosso di Rodi |
+| **Stanlio e Ollio restaurati** | 26 film della coppia più amata, restaurati e in italiano (RaiPlay) |
+| **Grandi classici di Hollywood (italiano)** | Su RaiPlay, doppiati in italiano: Gilda, Da qui all'eternità, Funny Girl… |
 | **Il grande cinema su RaiPlay** | Il Gattopardo, La piscina, Gruppo di famiglia in un interno… |
-| **Anni '40 / '50 / '60** | Un viaggio per decennio — **scrolla fino in fondo: arrivano altri film** |
-| **Scopri film sempre nuovi** | Il resto del catalogo, ordinato per popolarità — **scroll infinito** |
+| **Comiche senza parole** | Mute = nessuna lingua: Chaplin, Keaton, e i capolavori muti italiani L'Inferno e Cabiria |
+| **Scopri film sempre nuovi** | Tutto il resto del catalogo verificato — **scroll infinito, sempre nuovi titoli** |
 
-Oltre **180 film verificati uno a uno** (esistono, sono davvero film, e hanno un file video riproducibile) + infinite pagine di scoperta via scroll.
+**87 film verificati uno a uno** (esistono, sono davvero film, hanno un file video riproducibile e sono di origine italiana) + i cataloghi RaiPlay sempre aggiornati + infinite pagine di scoperta via scroll.
 
-La **ricerca** cerca contemporaneamente su RaiPlay e Internet Archive e **continua a caricare risultati mentre scorri**.
+La **ricerca** parte dal catalogo italiano curato (istantanea) e poi continua su Internet Archive, **caricando altri risultati mentre scorri**.
 
 ---
 
@@ -94,16 +95,16 @@ retrocinema/
 Ogni push su `main`/`master` avvia **GitHub Actions**: il workflow esegue `./gradlew make makePluginsJson`, copia i `.cs3` e il `plugins.json` generato nel branch **`builds`**. Il `repo.json` punta lì: l'app scarica sempre l'ultima build, con **aggiornamento automatico** (basta incrementare `version` nel `build.gradle.kts` del modulo).
 
 ### Come sono scelti i contenuti
-- **Catalogo verificato (181 film)**: ogni film è stato controllato automaticamente via API `metadata` di Internet Archive prima di entrare nel catalogo — deve esistere, essere un film (mediatype movies), avere un file MP4/MKV riproducibile da ExoPlayer e superare i filtri anti-horror. Titoli e anni vengono puliti dallo spam degli uploader.
-- **RaiPlay** (legale, ufficiale, tutto in italiano): le righe usano le collezioni editoriali verificate `grandiclassicidihollywood`, `stanlioeollio-edizionirestaurate`, `ilgrandecinema` — si aggiornano da sole quando Rai cambia il catalogo. Gli item con genere *horror/erotico* vengono filtrati nel codice.
-- **Internet Archive dinamico**: le righe decenni e "Scopri film sempre nuovi" sono query Lucene su `collection:(feature_films)` con `NOT subject:(horror)`, ordinate per `downloads desc`, con **paginazione nativa (scroll infinito, fino a 8 pagine)**.
+- **Catalogo ITALIANO verificato (87 film)**: sono ammessi SOLO film di origine italiana (audio italiano garantito) oppure comiche mute. Ogni film è stato controllato automaticamente via API `metadata` di Internet Archive: deve esistere, essere un film (mediatype movies), avere un file MP4/MKV riproducibile da ExoPlayer, una durata da lungometraggio e superare i filtri anti-horror/anti-adulti. Le versioni scelte provengono da uploader con `language=ita` esplicito o da release con traccia ITA; titoli e anni vengono puliti e riportati all'originale italiano.
+- **RaiPlay** (legale, ufficiale, tutto in italiano): le righe usano le collezioni editoriali verificate `stanlioeollio-edizionirestaurate`, `grandiclassicidihollywood` (doppiati ITA), `ilgrandecinema` — si aggiornano da sole quando Rai cambia il catalogo. Gli item con genere *horror/erotico* vengono filtrati nel codice.
+- **Scroll infinito locale**: la riga "Scopri film sempre nuovi" pagina il catalogo verificato in memoria (24 film a pagina, `hasNext` fino all'esaurimento) — zero richieste di rete, zero sorprese in lingua straniera.
 
 ### Note tecniche verificate sul campo (settembre 2026)
 - **RaiPlay**: le collezioni hanno due forme (`contents[].contents[]` e `blocks[].sets[].path_id` → ContentSet JSON): il parser le attraversa entrambe in modo ricorsivo.
 - **RaiPlay stream**: `/programmi/<slug>.json` → `first_item_path` → `/video/…json` → `video.content_url` (relinker) → `&output=71` = **playlist HLS m3u8**, con `Referer: https://www.raiplay.it` + **sottotitoli SRT italiani** da `subtitleList`.
 - **Internet Archive stream**: NON si usa l'estrattore interno `archive.org/details` di CloudStream (ha un selettore CSS malformato e lascia il player in caricamento infinito). Il plugin chiama `metadata/<id>` e costruisce **link diretti** `https://<server><dir>/<file>` (solo MPEG4/H.264/Matroska/DivX, nomi URL-encoded, niente Ogg/Theora né duplicati "IA"), con fallback su `/download/` e **sottotitoli .vtt** dell'item passati via `subtitleCallback`.
-- **Paginazione**: `getMainPage(page, request)` con `hasNext=true` per le righe dinamiche IA; `search(query, page)` sovrascritto con `SearchResponseList` per la ricerca a scroll infinito.
-- **Ricerca RaiPlay**: pagina SSR `ricerca.html?q=` (card con `data-info-url`/`data-video-json` + `aria-label`).
+- **Paginazione**: `getMainPage(page, request)` con `hasNext=true` per lo scroll infinito del catalogo; `search(query, page)` sovrascritto con `SearchResponseList` per la ricerca a scroll infinito.
+- **Ricerca RaiPlay**: la pagina SSR `ricerca.html` è stata dismessa (SPA); la ricerca parte dal catalogo locale e continua su Internet Archive. Il catalogo RaiPlay resta raggiungibile dalle righe della home.
 
 ### Crediti e licenza
 - Pattern del provider Internet Archive dal provider ufficiale di **Luna712** ([recloudstream/extensions](https://github.com/recloudstream/extensions)).
