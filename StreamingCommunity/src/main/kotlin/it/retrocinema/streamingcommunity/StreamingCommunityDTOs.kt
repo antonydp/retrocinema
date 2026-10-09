@@ -8,14 +8,16 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 
-/** Riga della homepage: slider oppure archivio con filtri (genere/anno/ordine). */
+/** Riga della homepage: slider oppure archivio con filtri (genere/anno/tipo/ordine). */
 data class ArchiveQuery(
     val kind: String,            // "slider" | "archive"
     val label: String,           // nome della riga mostrato nell'app
-    val slider: String? = null,  // top10 | trending | latest | upcoming
+    val slider: String? = null,  // trending | latest
     val genre: Int? = null,      // id genere (array nel sito)
     val year: Int? = null,       // anno di uscita (singolo nel sito)
+    val type: String? = null,    // "movie" | "tv" (verificato live)
     val sort: String? = null,    // release_date | created_at | score | views | name
+    val limit: Int? = null,      // se presente: riga fissa (es. Top 10) senza paginazione
 )
 
 /** Paginator Laravel usato da /it/archive e /it/search. */
@@ -162,9 +164,11 @@ internal fun archiveQuery(
     label: String,
     genre: Int? = null,
     year: Int? = null,
+    type: String? = null,
     sort: String? = null,
+    limit: Int? = null,
 ): Pair<String, String> =
-    ArchiveQuery(kind = "archive", label = label, genre = genre, year = year, sort = sort).toJson() to label
+    ArchiveQuery(kind = "archive", label = label, genre = genre, year = year, type = type, sort = sort, limit = limit).toJson() to label
 
 internal fun sliderQuery(slider: String, label: String): Pair<String, String> =
     ArchiveQuery(kind = "slider", label = label, slider = slider).toJson() to label

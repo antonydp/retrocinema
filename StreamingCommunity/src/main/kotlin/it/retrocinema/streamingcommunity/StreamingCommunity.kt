@@ -39,11 +39,12 @@ import java.nio.charset.StandardCharsets
 const val SC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"
 
 /**
- * StreamingCommunity - versione RetroCinema con homepage ESTREMAMENTE ricca.
+ * StreamingCommunity - versione RetroCinema con homepage ricca e ordinata.
  *
  * Cambia pochissimo rispetto al sito (stesse API Inertia, stesso player
- * VixCloud/VixSrc) ma la home ha oltre 30 file: slider ufficiali, nuove
- * uscite per anno, righe curate per i gusti di famiglia e tutti i generi.
+ * VixCloud/VixSrc) ma la home e riorganizzata: in cima Top 10 serie e
+ * Top 10 film (i piu visti), Tendenze di adesso e Aggiunti di recente;
+ * poi tutti i generi ordinati per tendenza; in fondo le annate.
  * OGNI riga di archivio ha lo scroll infinito (17 pagine da 60 titoli,
  * lo stesso tetto che il sito impone ai clienti web).
  *
@@ -85,45 +86,44 @@ class StreamingCommunity : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    //  HOMEPAGE ESTREMAMENTE RICCA (31 righe, quasi tutte infinite)
+    //  HOMEPAGE ORDINATA (24 righe, generi e annate infinite)
+    //
+    //  1. Top 10 serie / Top 10 film: i piu visti (sort=views + filtro
+    //     type, verificato live; lo slider ufficiale top10 e misto e un
+    //     giorno puo contenere solo serie, quindi non lo usiamo)
+    //  2. Tendenze di adesso + Aggiunti di recente: slider ufficiali
+    //  3. Generi, tutti ordinati per tendenza (sort=views), scroll infinito
+    //  4. Le annate 2026/2025/2024 in fondo
     // ------------------------------------------------------------------
     override val mainPage = mainPageOf(
+        // --- In cima: top 10 separati per tipo ---
+        archiveQuery("Top 10 serie", type = "tv", sort = "views", limit = 10),
+        archiveQuery("Top 10 film", type = "movie", sort = "views", limit = 10),
         // --- Slider ufficiali del sito ---
-        sliderQuery("top10", "Top 10 di oggi"),
         sliderQuery("trending", "Tendenze di adesso"),
         sliderQuery("latest", "Aggiunti di recente"),
-        sliderQuery("upcoming", "In arrivo al cinema"),
-        // --- Nuove uscite per anno ---
+        // --- Generi ordinati per tendenza (scroll infinito) ---
+        archiveQuery("Commedie", genre = 12, sort = "views"),
+        archiveQuery("Storie d'amore", genre = 15, sort = "views"),
+        archiveQuery("Famiglia", genre = 16, sort = "views"),
+        archiveQuery("Animazione", genre = 19, sort = "views"),
+        archiveQuery("Avventura", genre = 11, sort = "views"),
+        archiveQuery("Azione", genre = 4, sort = "views"),
+        archiveQuery("Drammi", genre = 1, sort = "views"),
+        archiveQuery("Crime", genre = 2, sort = "views"),
+        archiveQuery("Mistero", genre = 6, sort = "views"),
+        archiveQuery("Fantascienza", genre = 10, sort = "views"),
+        archiveQuery("Fantasy", genre = 8, sort = "views"),
+        archiveQuery("Western", genre = 20, sort = "views"),
+        archiveQuery("Guerra", genre = 9, sort = "views"),
+        archiveQuery("Storia", genre = 22, sort = "views"),
+        archiveQuery("Musical e musica", genre = 14, sort = "views"),
+        archiveQuery("Documentari", genre = 24, sort = "views"),
+        archiveQuery("Film TV", genre = 21, sort = "views"),
+        // --- Le annate, in fondo ---
         archiveQuery("Nuove uscite 2026", year = 2026),
         archiveQuery("Nuove uscite 2025", year = 2025),
         archiveQuery("Nuove uscite 2024", year = 2024),
-        // --- Novita per i gusti di casa ---
-        archiveQuery("Storie d'amore nuove 2026", genre = 15, year = 2026),
-        archiveQuery("Commedie nuove 2026", genre = 12, year = 2026),
-        archiveQuery("Famiglia e bambini 2026", genre = 16, year = 2026),
-        // --- Le piu belle (ordinate per voto) ---
-        archiveQuery("Le storie d'amore piu belle", genre = 15, sort = "score"),
-        archiveQuery("Le commedie piu belle", genre = 12, sort = "score"),
-        archiveQuery("L'animazione piu amata", genre = 19, sort = "score"),
-        archiveQuery("Film per la famiglia piu amati", genre = 16, sort = "score"),
-        // --- Tutti i generi (scroll infinito) ---
-        archiveQuery("Commedie", genre = 12),
-        archiveQuery("Storie d'amore", genre = 15),
-        archiveQuery("Famiglia", genre = 16),
-        archiveQuery("Animazione", genre = 19),
-        archiveQuery("Avventura", genre = 11),
-        archiveQuery("Azione", genre = 4),
-        archiveQuery("Drammi", genre = 1),
-        archiveQuery("Crime", genre = 2),
-        archiveQuery("Mistero", genre = 6),
-        archiveQuery("Fantascienza", genre = 10),
-        archiveQuery("Fantasy", genre = 8),
-        archiveQuery("Western", genre = 20),
-        archiveQuery("Guerra", genre = 9),
-        archiveQuery("Storia", genre = 22),
-        archiveQuery("Musical e musica", genre = 14),
-        archiveQuery("Documentari", genre = 24),
-        archiveQuery("Film TV", genre = 21),
     )
 
     // ------------------------------------------------------------------
@@ -272,6 +272,7 @@ class StreamingCommunity : MainAPI() {
                 )
                 query.genre?.let { params["genre[]"] = it.toString() }
                 query.year?.let { params["year"] = it.toString() }
+                query.type?.let { params["type"] = it }
                 query.sort?.let { params["sort"] = it }
 
                 val response = app.get(
@@ -280,9 +281,12 @@ class StreamingCommunity : MainAPI() {
                     headers = sliderHeaders(),
                 )
                 val titles = parseArchiveTitles(response.body.string())
-                val items = searchResponseBuilder(titles)
-                if (items.isEmpty()) return null
-                val hasNext = titles.size >= PAGE_SIZE && current < MAX_PAGE
+                val allItems = searchResponseBuilder(titles)
+                if (allItems.isEmpty()) return null
+                // Riga con limite (es. Top 10): solo i primi N, senza paginazione
+                val capped = query.limit != null
+                val items = if (capped) allItems.take(query.limit) else allItems
+                val hasNext = !capped && titles.size >= PAGE_SIZE && current < MAX_PAGE
                 newHomePageResponse(
                     HomePageList(query.label, items),
                     hasNext = hasNext
