@@ -1,6 +1,6 @@
 {
     "name": "RetroCinema",
-    "description": "Oltre 300 film TUTTI IN ITALIANO verificati uno a uno: classici (Totò, Sordi, Gassman, Fellini, De Sica), storie d'amore, film con i bambini, film tratti da libri, comiche mute e film recenti fino alle nuove uscite su RaiPlay. Include anche StreamingCommunity versione arricchita: 31 righe in home (Top 10, tendenze, nuove uscite, tutti i generi) ognuna a scroll infinito. Scroll infinito, per tutta la famiglia.",
+    "description": "Oltre 300 film TUTTI IN ITALIANO verificati uno a uno: classici (Totò, Sordi, Gassman, Fellini, De Sica), storie d'amore, film con i bambini, film tratti da libri, comiche mute e film recenti fino alle nuove uscite su RaiPlay. Include anche StreamingCommunity versione migliorata: home ordinata con Top 10 serie, Top 10 film, Tendenze di adesso, Aggiunti di recente, generi in ordine di tendenza e annate in fondo, ognuna a scroll infinito. Per tutta la famiglia.",
     "iconUrl": "https://raw.githubusercontent.com/antonydp/retrocinema/main/logo.png",
     "manifestVersion": 1,
     "pluginLists": [
