@@ -275,6 +275,35 @@ class StreamingCommunity : MainAPI() {
         "Origin" to siteRootUrl.removeSuffix("/"),
     )
 
+    /**
+     * Intestazioni da NAVIGAZIONE semplice: le stesse che manda il browser
+     * quando si apre una pagina browse (niente X-Requested-With/Origin/
+     * Content-Type, che su certe rotte possono far scattare controlli in piu).
+     * Verificato: con queste il sito risponde SEMPRE con la pagina SSR che
+     * contiene data-page (60 titoli).
+     */
+    private fun browseNavHeaders(): Map<String, String> = mapOf(
+        "User-Agent" to SC_UA,
+        "Cookie" to (sessionHeaders["Cookie"] ?: ""),
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language" to "it-IT,it;q=0.9",
+        "Referer" to "$mainUrl/",
+    )
+
+    /**
+     * Richiesta Inertia vera: quella che fa il sito quando l'utente preme
+     * "carica altre" nelle pagine browse; risponde JSON con props.titles.
+     */
+    private fun inertiaHeaders(path: String): Map<String, String> = sliderHeaders() + mapOf(
+        "X-Inertia" to "true",
+        "X-Inertia-Version" to inertiaVersion,
+        "Referer" to mainUrl + path,
+    )
+
+    /** Codici che richiedono sessione fresca prima di riprovare. */
+    private fun needsSessionRefresh(code: Int): Boolean =
+        code == 403 || code == 409 || code == 419 || code == 429
+
     private suspend fun ensureSession(force: Boolean = false) {
         val hasSession = !sessionHeaders["Cookie"].isNullOrBlank() && inertiaVersion.isNotBlank()
         if (hasSession && !force) return
@@ -329,7 +358,11 @@ class StreamingCommunity : MainAPI() {
     }
 
     private fun extractInertiaPageJson(html: String): String? {
-        val dataPageRaw = org.jsoup.Jsoup.parse(html).selectFirst("#app")?.attr("data-page")
+        val doc = org.jsoup.Jsoup.parse(html)
+        // #app e il posto standard; il selettore generico copre eventuali
+        // markup diversi (certo e l'attributo data-page, non l'id del div)
+        val dataPageRaw = doc.selectFirst("#app")?.attr("data-page")
+            ?: doc.selectFirst("[data-page]")?.attr("data-page")
         if (dataPageRaw.isNullOrBlank()) return null
         return Parser.unescapeEntities(dataPageRaw, true)
     }
@@ -342,8 +375,13 @@ class StreamingCommunity : MainAPI() {
             return runCatching { parseJson<ScInertiaResponse>(json) }
                 .getOrNull()?.props?.titles ?: emptyList()
         }
-        // JSON paginator diretto: {current_page, data, last_page}
-        tryParseJson<ScPaginator>(payload)?.data?.let { return it }
+        // JSON paginator diretto: {current_page, data, last_page}. SOLO con
+        // lista NON vuota: qualunque altro JSON (es. una risposta Inertia di
+        // una pagina browse) si mappa in un paginator VUOTO, e prima qui
+        // veniva restituito cosi com'e facendo sparire la riga.
+        tryParseJson<ScPaginator>(payload)?.data
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
         // A volte Inertia risponde con l'oggetto props completo
         return runCatching { parseJson<ScInertiaResponse>(payload) }
             .getOrNull()?.props?.titles ?: emptyList()
@@ -404,13 +442,24 @@ class StreamingCommunity : MainAPI() {
         return try {
             if (attempt > 0) ensureSession(force = true)
             val path = query.path ?: return null
+            // Stile di richiesta DIVERSO ad ogni tentativo: (0) navigazione
+            // semplice, come quando il browser apre la pagina; (1) richiesta
+            // Inertia, come il tasto "carica altre" del sito; (2) XHR come le
+            // righe archivio (che funzionano). Uno dei tre arriva sempre.
             val response = app.get(
                 siteRootUrl + path.removePrefix("/"),
                 params = mapOf("page" to page.toString(), "lang" to "it"),
-                headers = sliderHeaders(),
+                headers = when (attempt) {
+                    0 -> browseNavHeaders()
+                    1 -> inertiaHeaders(path)
+                    else -> sliderHeaders()
+                },
             )
-            // 403/419/429: Cloudflare o limite del sito -> sessione fresca e riprova
-            if (response.code == 403 || response.code == 419 || response.code == 429) {
+            if (needsSessionRefresh(response.code)) {
+                // 409 = versione Inertia scaduta: svuotandola il prossimo
+                // ensureSession(force) bypassa il limite dei 20 secondi e
+                // rifare davvero cookie + versione (non un no-op)
+                if (response.code == 409) inertiaVersion = ""
                 ensureSession(force = true)
                 return null
             }
@@ -449,7 +498,8 @@ class StreamingCommunity : MainAPI() {
                 params = params,
                 headers = sliderHeaders(),
             )
-            if (response.code == 403 || response.code == 419 || response.code == 429) {
+            if (needsSessionRefresh(response.code)) {
+                if (response.code == 409) inertiaVersion = ""
                 ensureSession(force = true)
                 return null
             }

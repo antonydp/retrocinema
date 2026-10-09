@@ -6,6 +6,11 @@ package it.retrocinema.streamingcommunity
  */
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.JsonToken
+import com.fasterxml.jackson.databind.DeserializationContext
+import com.fasterxml.jackson.databind.JsonDeserializer
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 
 /** Riga della homepage: pagina browse oppure archivio con filtri (genere/anno/tipo/ordine). */
 data class ArchiveQuery(
@@ -70,6 +75,25 @@ data class ScInertiaResponse(
     @JsonProperty("version") val version: String? = null,
 )
 
+/**
+ * titles arriva in DUE forme a seconda della rotta/versione del sito:
+ * - lista semplice di titoli (pagine browse e archivio attuali, SSR)
+ * - paginator Laravel {current_page, data:[...], last_page} (risposte
+ *   Inertia di altre versioni del sito)
+ * Questo deserializer accetta entrambe senza far fallire tutto il parse.
+ */
+class ScTitlesDeserializer : JsonDeserializer<List<ScTitle>>() {
+    override fun deserialize(p: JsonParser, ctxt: DeserializationContext): List<ScTitle> {
+        return if (p.currentToken == JsonToken.START_OBJECT) {
+            ctxt.readValue(p, ScPaginator::class.java).data
+        } else {
+            val listType = ctxt.typeFactory
+                .constructCollectionType(List::class.java, ScTitle::class.java)
+            ctxt.readValue(p, listType)
+        }
+    }
+}
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class ScProps(
     @JsonProperty("scws_url") val scwsUrl: String? = null,
@@ -80,6 +104,7 @@ data class ScProps(
     @JsonProperty("genres") val genres: List<ScGenre>? = null,
     @JsonProperty("label") val label: String? = null,
     @JsonProperty("browseMoreApiRoute") val browseMoreApiRoute: String? = null,
+    @JsonDeserialize(using = ScTitlesDeserializer::class)
     @JsonProperty("titles") val titles: List<ScTitle>? = null,
 )
 
