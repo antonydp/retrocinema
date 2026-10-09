@@ -60,11 +60,25 @@ const val SC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/201
  * a fronte di 403/419/429 (Cloudflare/limite del sito): e quello che
  * faceva sparire alcune righe a intermittenza.
  *
+ * Domini: il sito ruota indirizzi di continuo (ott 2026: i vecchi .win/
+ * .vip/.red reindirizzano a .fun/.rip). Il plugin prova i domini in ordine
+ * e adotta SEMPRE quello finale dopo i redirect (cookie e token restano
+ * coerenti); se TUTTI i domini noti muoiono, chiede il dominio aggiornato
+ * al portale streaming-community.how (ultima spiaggia: ogni dominio
+ * trovato viene validato contro l'app Inertia vera prima dell'uso).
+ *
  * Basato sul provider "HadEnough" di doGior (GPL-3.0).
  */
 class StreamingCommunity : MainAPI() {
     // Domini in ordine di preferenza: il sito cambia spesso, si usa il primo vivo.
+    // .fun e .rip sono i domini attuali (ott 2026: i vecchi reindirizzano qui,
+    // confermato da browser e portale); .dog e' nel portale ufficiale. I vecchi
+    // restano in fondo come riserva: se rispondono, si segue il redirect e si
+    // adotta il dominio finale.
     private val domainCandidates = listOf(
+        "https://streamingunity.fun/",
+        "https://streamingcommunityz.rip/",
+        "https://streamingunity.dog/",
         "https://streamingunity.win/",
         "https://streamingunity.vip/",
         "https://streamingcommunityz.red/",
@@ -105,6 +119,16 @@ class StreamingCommunity : MainAPI() {
         /** Context messo a disposizione dal plugin al caricamento. */
         @Volatile
         var appContext: Context? = null
+
+        /** Portale che pubblica il dominio aggiornato (ultima spiaggia). */
+        const val PORTAL_URL = "https://www.streaming-community.how/"
+
+        /** Minimo tra due controlli del portale (ms): 6 ore. */
+        const val PORTAL_MIN_MS = 6 * 60 * 60 * 1000L
+
+        /** Ultimo controllo del portale (evita richieste continue). */
+        @Volatile
+        private var lastPortalCheckMs = 0L
 
         /** Sezioni gia lette dalle impostazioni (evita rilisure continue). */
         @Volatile
@@ -152,47 +176,93 @@ class StreamingCommunity : MainAPI() {
     private suspend fun setupHeaders() {
         val candidates = listOf(siteRootUrl) + domainCandidates.filter { it != siteRootUrl }
         for (root in candidates) {
-            val probe = runCatching {
-                app.get(root + "it/archive", headers = mapOf("User-Agent" to SC_UA))
-            }.getOrNull() ?: continue
-            if (probe.code !in 200..299) continue
-
-            val dataPage = runCatching { probe.document.select("#app").attr("data-page") }
-                .getOrNull().orEmpty()
-            val version = dataPage
-                .substringAfter("\"version\":\"", "")
-                .substringBefore("\"")
-            if (version.isBlank()) continue
-
-            // Dominio vivo: lo adottiamo (anche cdn e mainUrl)
-            siteRootUrl = root
-            cdnHost = "cdn." + root.toHttpUrl().host
-            mainUrl = root + "it"
-
-            val cookieJar = linkedMapOf<String, String>()
-            probe.cookies.forEach { (k, v) -> cookieJar[k] = v }
-
-            val csrf = runCatching {
-                app.get(
-                    root + "sanctum/csrf-cookie",
-                    headers = mapOf(
-                        "User-Agent" to SC_UA,
-                        "Referer" to "$mainUrl/",
-                        "X-Requested-With" to "XMLHttpRequest",
-                    )
-                )
-            }.getOrNull()
-            csrf?.cookies?.forEach { (k, v) -> cookieJar[k] = v }
-
-            sessionHeaders["Cookie"] = cookieJar.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            decodedXsrfToken = cookieJar["XSRF-TOKEN"]
-                ?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
-                ?: ""
-            inertiaVersion = version
-            sessionHeaders["X-Inertia-Version"] = version
-            return
+            if (adoptDomain(root)) return
+        }
+        // Ultima spiaggia: il portale che pubblica il dominio aggiornato del
+        // sito, consultato SOLO quando tutti i domini conosciuti sono morti
+        // (al massimo una volta ogni PORTAL_MIN_MS). Ogni dominio trovato
+        // viene comunque VALIDATO da adoptDomain: deve servire l'app Inertia
+        // vera (data-page con versione), cosi un clone non viene adottato.
+        if (System.currentTimeMillis() - lastPortalCheckMs > PORTAL_MIN_MS) {
+            lastPortalCheckMs = System.currentTimeMillis()
+            for (root in portalCandidates()) {
+                if (root !in domainCandidates && root != siteRootUrl && adoptDomain(root)) return
+            }
         }
     }
+
+    /** Prova un dominio: se serve l'app Inertia vera lo adotta (con sessione). */
+    private suspend fun adoptDomain(root: String): Boolean {
+        val probe = runCatching {
+            app.get(root + "it/archive", headers = mapOf("User-Agent" to SC_UA))
+        }.getOrNull() ?: return false
+        if (probe.code !in 200..299) return false
+
+        val dataPage = runCatching { probe.document.select("#app").attr("data-page") }
+            .getOrNull().orEmpty()
+        val version = dataPage
+            .substringAfter("\"version\":\"", "")
+            .substringBefore("\"")
+        if (version.isBlank()) return false
+
+        // Il dominio puo fare redirect (il sito ruota spesso): adottiamo
+        // quello FINALE, cosi cookie e richieste restano coerenti (e non si
+        // rifanno redirect ad ogni richiesta).
+        val finalRoot = runCatching { probe.url.toHttpUrl().host }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { "https://$it/" }
+            ?: root
+
+        // Dominio vivo: lo adottiamo (anche cdn e mainUrl)
+        siteRootUrl = finalRoot
+        cdnHost = "cdn." + finalRoot.toHttpUrl().host
+        mainUrl = finalRoot + "it"
+
+        val cookieJar = linkedMapOf<String, String>()
+        probe.cookies.forEach { (k, v) -> cookieJar[k] = v }
+
+        val csrf = runCatching {
+            app.get(
+                finalRoot + "sanctum/csrf-cookie",
+                headers = mapOf(
+                    "User-Agent" to SC_UA,
+                    "Referer" to "$mainUrl/",
+                    "X-Requested-With" to "XMLHttpRequest",
+                )
+            )
+        }.getOrNull()
+        csrf?.cookies?.forEach { (k, v) -> cookieJar[k] = v }
+
+        sessionHeaders["Cookie"] = cookieJar.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        decodedXsrfToken = cookieJar["XSRF-TOKEN"]
+            ?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
+            ?: ""
+        inertiaVersion = version
+        sessionHeaders["X-Inertia-Version"] = version
+        return true
+    }
+
+    /**
+     * Domini candidati letti dal portale che traccia il dominio aggiornato
+     * del sito (usato SOLO se tutti i candidati fissi falliscono). Teniamo
+     * solo host che contengono "streaming", scartando il portale stesso:
+     * poi tutto passa dalla validazione di adoptDomain.
+     */
+    private suspend fun portalCandidates(): List<String> = runCatching {
+        val res = app.get(PORTAL_URL, headers = mapOf("User-Agent" to SC_UA))
+        if (res.code !in 200..299) {
+            emptyList()
+        } else {
+            Regex("https?://[A-Za-z0-9.-]*streaming[A-Za-z0-9.-]*\\.[A-Za-z]{2,}")
+                .findAll(res.body.string())
+                .map { it.value.lowercase() }
+                .map { "https://$it/" }
+                .distinct()
+                .filter { !it.contains("streaming-community.how") }
+                .toList()
+        }
+    }.getOrDefault(emptyList())
 
     private fun sliderHeaders(): Map<String, String> = mapOf(
         "User-Agent" to SC_UA,
@@ -230,6 +300,23 @@ class StreamingCommunity : MainAPI() {
             lastSessionMs = System.currentTimeMillis()
         } finally {
             sessionLock.set(false)
+        }
+    }
+
+    /**
+     * Se il sito ha cambiato dominio a sessione aperta (la risposta arriva
+     * da un host diverso da quello richiesto), adotta il dominio finale:
+     * le richieste successive vanno dritte, senza rifare redirect ad ogni
+     * chiamata e con cookie/token coerenti col dominio vero.
+     */
+    private fun maybeAdoptRedirect(response: com.lagradost.nicehttp.NiceResponse) {
+        runCatching {
+            val host = response.url.toHttpUrl().host
+            if (host.isNotBlank() && host != siteRootUrl.toHttpUrl().host) {
+                siteRootUrl = "https://$host/"
+                cdnHost = "cdn.$host"
+                mainUrl = siteRootUrl + "it"
+            }
         }
     }
 
@@ -319,7 +406,7 @@ class StreamingCommunity : MainAPI() {
             val path = query.path ?: return null
             val response = app.get(
                 siteRootUrl + path.removePrefix("/"),
-                params = mapOf("page" to page.toString()),
+                params = mapOf("page" to page.toString(), "lang" to "it"),
                 headers = sliderHeaders(),
             )
             // 403/419/429: Cloudflare o limite del sito -> sessione fresca e riprova
@@ -328,6 +415,7 @@ class StreamingCommunity : MainAPI() {
                 return null
             }
             if (response.code !in 200..299) return null
+            maybeAdoptRedirect(response)
             // Pagina oltre l'ultima: il sito risponde 200 con titoli vuoti
             // -> null e l'app smette di paginare (comportamento corretto)
             val titles = parseArchiveTitles(response.body.string())
@@ -366,6 +454,7 @@ class StreamingCommunity : MainAPI() {
                 return null
             }
             if (response.code !in 200..299) return null
+            maybeAdoptRedirect(response)
             val titles = parseArchiveTitles(response.body.string())
             if (titles.isEmpty()) return null
             val allItems = searchResponseBuilder(titles)
