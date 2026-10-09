@@ -20,8 +20,11 @@ cloudstream {
         "Cartoon"
     )
 
-    // Necessario: il player VixCloud e dietro Cloudflare e serve il bypass in app
-    requiresResources = true
+    // false: il bypass Cloudflare (CloudflareKiller) e autonomo nell'app e NON
+    // richiede risorse del plugin; con true il task make cerca res.apk che
+    // non esiste per moduli senza cartella res/ (verificato nel sorgente
+    // recloudstream/gradle: Tasks.kt -> zipTree(resApkFile))
+    requiresResources = false
     language = "it"
 
     iconUrl = "https://streamingunity.win/apple-touch-icon.png"
