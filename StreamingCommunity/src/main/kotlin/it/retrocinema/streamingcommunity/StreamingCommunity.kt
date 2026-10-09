@@ -1,5 +1,6 @@
 package it.retrocinema.streamingcommunity
 
+import android.content.Context
 import com.lagradost.cloudstream3.APIHolder.capitalize
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
@@ -11,6 +12,7 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addScore
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SearchResponseList
@@ -34,19 +36,27 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.parser.Parser
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** User-Agent realistico: necessario per la sessione Inertia. */
 const val SC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"
 
 /**
- * StreamingCommunity - versione RetroCinema con homepage ricca e ordinata.
+ * StreamingCommunity - versione RetroCinema con homepage ordinata e
+ * personalizzabile.
  *
  * Cambia pochissimo rispetto al sito (stesse API Inertia, stesso player
- * VixCloud/VixSrc) ma la home e riorganizzata: in cima Top 10 serie e
- * Top 10 film (i piu visti), Tendenze di adesso e Aggiunti di recente;
- * poi tutti i generi ordinati per tendenza; in fondo le annate.
- * OGNI riga di archivio ha lo scroll infinito (17 pagine da 60 titoli,
+ * VixCloud/VixSrc) ma la home e riorganizzata e l'utente puo sceglierla:
+ * dal menu impostazioni del plugin (gear in home) puo riordinare e
+ * disattivare le sezioni (preset Standard/Famiglia/Solo film/Solo serie).
+ * Ogni riga di archivio ha lo scroll infinito (17 pagine da 60 titoli,
  * lo stesso tetto che il sito impone ai clienti web).
+ *
+ * Stabilita: le righe della home vengono caricate IN SEQUENZA
+ * (sequentialMainPage) invece che tutte insieme, ogni richiesta riprova
+ * da sola e la sessione Inertia e protetta da un lock con refresh forzato
+ * a fronte di 403/419/429 (Cloudflare/limite del sito): e quello che
+ * faceva sparire alcune righe a intermittenza.
  *
  * Basato sul provider "HadEnough" di doGior (GPL-3.0).
  */
@@ -62,6 +72,8 @@ class StreamingCommunity : MainAPI() {
     private var cdnHost = "cdn." + siteRootUrl.toHttpUrl().host
     private var inertiaVersion = ""
     private var decodedXsrfToken = ""
+    private val sessionLock = AtomicBoolean(false)
+    private var lastSessionMs = 0L
     private val sessionHeaders = mutableMapOf(
         "User-Agent" to SC_UA,
         "Cookie" to "",
@@ -83,48 +95,52 @@ class StreamingCommunity : MainAPI() {
         const val MAX_PAGE = 17
         /** Item per pagina dell'archivio: usato per capire se c'e una pagina dopo. */
         const val PAGE_SIZE = 60
+        /** Tentativi per ogni riga della home prima di arrendersi. */
+        const val RETRIES = 3
+        /** Minimo tra due refresh forzati della sessione (ms). */
+        const val REFRESH_MIN_MS = 20_000L
+
+        /** Context messo a disposizione dal plugin al caricamento. */
+        @Volatile
+        var appContext: Context? = null
+
+        /** Sezioni gia lette dalle impostazioni (evita rilisure continue). */
+        @Volatile
+        private var cachedSections: List<ScSection>? = null
+
+        /** Da chiamare dopo un cambio di impostazioni: ricostruisce la home. */
+        fun invalidateSections() {
+            cachedSections = null
+        }
     }
 
     // ------------------------------------------------------------------
-    //  HOMEPAGE ORDINATA (24 righe, generi e annate infinite)
+    //  HOMEPAGE DINAMICA
     //
+    //  Ordine e sezioni attive vengono dal menu impostazioni del plugin
+    //  (salvate con DataStore); senza scelte utente si usa l'ordine
+    //  predefinito (vedi ScSections.DEFAULT):
     //  1. Top 10 serie / Top 10 film: i piu visti (sort=views + filtro
     //     type, verificato live; lo slider ufficiale top10 e misto e un
     //     giorno puo contenere solo serie, quindi non lo usiamo)
     //  2. Tendenze di adesso + Aggiunti di recente: slider ufficiali
     //  3. Generi, tutti ordinati per tendenza (sort=views), scroll infinito
     //  4. Le annate 2026/2025/2024 in fondo
+    //
+    //  Le righe vengono richieste IN SEQUENZA dall'app
+    //  (sequentialMainPage): e la cura principale per il problema per cui
+    //  a volte qualche sezione non compariva (troppe richieste in
+    //  parallelo scartate da Cloudflare/sito).
     // ------------------------------------------------------------------
-    override val mainPage = mainPageOf(
-        // --- In cima: top 10 separati per tipo ---
-        archiveQuery("Top 10 serie", type = "tv", sort = "views", limit = 10),
-        archiveQuery("Top 10 film", type = "movie", sort = "views", limit = 10),
-        // --- Slider ufficiali del sito ---
-        sliderQuery("trending", "Tendenze di adesso"),
-        sliderQuery("latest", "Aggiunti di recente"),
-        // --- Generi ordinati per tendenza (scroll infinito) ---
-        archiveQuery("Commedie", genre = 12, sort = "views"),
-        archiveQuery("Storie d'amore", genre = 15, sort = "views"),
-        archiveQuery("Famiglia", genre = 16, sort = "views"),
-        archiveQuery("Animazione", genre = 19, sort = "views"),
-        archiveQuery("Avventura", genre = 11, sort = "views"),
-        archiveQuery("Azione", genre = 4, sort = "views"),
-        archiveQuery("Drammi", genre = 1, sort = "views"),
-        archiveQuery("Crime", genre = 2, sort = "views"),
-        archiveQuery("Mistero", genre = 6, sort = "views"),
-        archiveQuery("Fantascienza", genre = 10, sort = "views"),
-        archiveQuery("Fantasy", genre = 8, sort = "views"),
-        archiveQuery("Western", genre = 20, sort = "views"),
-        archiveQuery("Guerra", genre = 9, sort = "views"),
-        archiveQuery("Storia", genre = 22, sort = "views"),
-        archiveQuery("Musical e musica", genre = 14, sort = "views"),
-        archiveQuery("Documentari", genre = 24, sort = "views"),
-        archiveQuery("Film TV", genre = 21, sort = "views"),
-        // --- Le annate, in fondo ---
-        archiveQuery("Nuove uscite 2026", year = 2026),
-        archiveQuery("Nuove uscite 2025", year = 2025),
-        archiveQuery("Nuove uscite 2024", year = 2024),
-    )
+    override var sequentialMainPage: Boolean = true
+
+    override val mainPage: List<MainPageData>
+        get() {
+            val sections = cachedSections ?: ScSections.loadOrder(appContext).also {
+                cachedSections = it
+            }
+            return mainPageOf(*sections.map { it.toPair() }.toTypedArray())
+        }
 
     // ------------------------------------------------------------------
     //  Sessione Inertia (version + cookie XSRF) con failover dei domini
@@ -185,9 +201,31 @@ class StreamingCommunity : MainAPI() {
         "Origin" to siteRootUrl.removeSuffix("/"),
     )
 
-    private suspend fun ensureSession() {
-        if (sessionHeaders["Cookie"].isNullOrBlank() || inertiaVersion.isBlank()) {
+    private suspend fun ensureSession(force: Boolean = false) {
+        val hasSession = !sessionHeaders["Cookie"].isNullOrBlank() && inertiaVersion.isNotBlank()
+        if (hasSession && !force) return
+        // I refresh forzati non piu di uno ogni REFRESH_MIN_MS: cosi le
+        // tante righe della home non rimartellano il sito quando una
+        // risposta viene scartata.
+        if (force && hasSession && System.currentTimeMillis() - lastSessionMs < REFRESH_MIN_MS) return
+
+        if (!sessionLock.compareAndSet(false, true)) {
+            // un'altra richiesta sta gia configurando la sessione: aspetta
+            var waited = 0
+            while (sessionLock.get() && waited < 10_000) {
+                Thread.sleep(120)
+                waited += 120
+            }
+            val nowFresh = !sessionHeaders["Cookie"].isNullOrBlank() && inertiaVersion.isNotBlank()
+            if (nowFresh && !force) return
+            if (force && nowFresh && System.currentTimeMillis() - lastSessionMs < REFRESH_MIN_MS) return
+            if (!sessionLock.compareAndSet(false, true)) return
+        }
+        try {
             setupHeaders()
+            lastSessionMs = System.currentTimeMillis()
+        } finally {
+            sessionLock.set(false)
         }
     }
 
@@ -232,8 +270,24 @@ class StreamingCommunity : MainAPI() {
         }
 
     // ------------------------------------------------------------------
-    //  HOMEPAGE
+    //  HOMEPAGE (con retry: Cloudflare/sito a volte scartano le richieste
+    //  e senza retry la riga spariva dalla home)
     // ------------------------------------------------------------------
+
+    /** Riprova fino a RETRIES volte con attesa crescente tra un tentativo e l'altro. */
+    private suspend fun <T> withRetries(block: suspend (attempt: Int) -> T?): T? {
+        var waitMs = 350L
+        repeat(RETRIES) { attempt ->
+            val result = block(attempt)
+            if (result != null) return result
+            if (attempt < RETRIES - 1) {
+                Thread.sleep(waitMs)
+                waitMs = (waitMs * 2).coerceAtMost(1500)
+            }
+        }
+        return null
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val current = page.coerceAtLeast(1)
         val query = try {
@@ -247,52 +301,85 @@ class StreamingCommunity : MainAPI() {
         return when (query.kind) {
             "slider" -> {
                 val sliderName = query.slider ?: return null
-                val body = "{\"sliders\":[{\"name\":\"$sliderName\",\"genre\":null}]}"
-                val response = app.post(
-                    "${siteRootUrl}api/sliders/fetch?lang=it",
-                    headers = sliderHeaders(),
-                    requestBody = body.toRequestBody()
-                )
-                val payload = response.body.string()
-                if (isHtmlPayload(payload)) return null
-                val slider = runCatching { parseJson<List<ScSlider>>(payload) }
-                    .getOrNull()?.firstOrNull() ?: return null
-                val items = searchResponseBuilder(slider.titles)
-                if (items.isEmpty()) return null
-                // Etichetta italiana nostra al posto di quella inglese del sito
-                newHomePageResponse(
-                    HomePageList(query.label, items, isHorizontalImages = false),
-                    hasNext = false
-                )
+                withRetries { attempt -> fetchSlider(sliderName, query.label, attempt) }
             }
             "archive" -> {
-                val params = mutableMapOf(
-                    "page" to current.toString(),
-                    "lang" to "it",
-                )
-                query.genre?.let { params["genre[]"] = it.toString() }
-                query.year?.let { params["year"] = it.toString() }
-                query.type?.let { params["type"] = it }
-                query.sort?.let { params["sort"] = it }
-
-                val response = app.get(
-                    "${siteRootUrl}it/archive",
-                    params = params,
-                    headers = sliderHeaders(),
-                )
-                val titles = parseArchiveTitles(response.body.string())
-                val allItems = searchResponseBuilder(titles)
-                if (allItems.isEmpty()) return null
-                // Riga con limite (es. Top 10): solo i primi N, senza paginazione
-                val capped = query.limit != null
-                val items = if (capped) allItems.take(query.limit) else allItems
-                val hasNext = !capped && titles.size >= PAGE_SIZE && current < MAX_PAGE
-                newHomePageResponse(
-                    HomePageList(query.label, items),
-                    hasNext = hasNext
-                )
+                withRetries { attempt -> fetchArchive(query, current, attempt) }
             }
             else -> null
+        }
+    }
+
+    private suspend fun fetchSlider(sliderName: String, label: String, attempt: Int): HomePageResponse? {
+        return try {
+            if (attempt > 0) ensureSession(force = true)
+            val body = "{\"sliders\":[{\"name\":\"$sliderName\",\"genre\":null}]}"
+            val response = app.post(
+                "${siteRootUrl}api/sliders/fetch?lang=it",
+                headers = sliderHeaders(),
+                requestBody = body.toRequestBody()
+            )
+            // 403/419/429: Cloudflare o limite del sito -> sessione fresca e riprova
+            if (response.code == 403 || response.code == 419 || response.code == 429) {
+                ensureSession(force = true)
+                return null
+            }
+            if (response.code !in 200..299) return null
+            val payload = response.body.string()
+            if (isHtmlPayload(payload)) {
+                ensureSession(force = true)
+                return null
+            }
+            val slider = runCatching { parseJson<List<ScSlider>>(payload) }
+                .getOrNull()?.firstOrNull() ?: return null
+            val items = searchResponseBuilder(slider.titles)
+            if (items.isEmpty()) return null
+            // Etichetta italiana nostra al posto di quella inglese del sito
+            newHomePageResponse(
+                HomePageList(label, items, isHorizontalImages = false),
+                hasNext = false
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private suspend fun fetchArchive(query: ArchiveQuery, page: Int, attempt: Int): HomePageResponse? {
+        return try {
+            if (attempt > 0) ensureSession(force = true)
+            val params = mutableMapOf(
+                "page" to page.toString(),
+                "lang" to "it",
+            )
+            query.genre?.let { params["genre[]"] = it.toString() }
+            query.year?.let { params["year"] = it.toString() }
+            query.type?.let { params["type"] = it }
+            query.sort?.let { params["sort"] = it }
+
+            val response = app.get(
+                "${siteRootUrl}it/archive",
+                params = params,
+                headers = sliderHeaders(),
+            )
+            if (response.code == 403 || response.code == 419 || response.code == 429) {
+                ensureSession(force = true)
+                return null
+            }
+            if (response.code !in 200..299) return null
+            val titles = parseArchiveTitles(response.body.string())
+            if (titles.isEmpty()) return null
+            val allItems = searchResponseBuilder(titles)
+            if (allItems.isEmpty()) return null
+            // Riga con limite (es. Top 10): solo i primi N, senza paginazione
+            val capped = query.limit != null
+            val items = if (capped) allItems.take(query.limit) else allItems
+            val hasNext = !capped && titles.size >= PAGE_SIZE && page < MAX_PAGE
+            newHomePageResponse(
+                HomePageList(query.label, items),
+                hasNext = hasNext
+            )
+        } catch (e: Exception) {
+            null
         }
     }
 

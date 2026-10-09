@@ -1,8 +1,8 @@
-// StreamingCommunity (versione RetroCinema) - homepage ordinata e infinita
-version = 2
+// StreamingCommunity (versione RetroCinema) - home personalizzabile e stabile
+version = 3
 
 cloudstream {
-    description = "StreamingCommunity con la home organizzata come si deve: Top 10 serie e Top 10 film (i piu visti), Tendenze di adesso, Aggiunti di recente, poi tutti i generi ordinati per tendenza (commedie, storie d'amore, famiglia, animazione, avventura...) e in fondo le annate 2026/2025/2024. Ogni riga con scroll infinito: migliaia di titoli. Film e serie in italiano con 1080p FHD. Basato sul provider di doGior (GPL-3.0), con domini di riserva automatici."
+    description = "StreamingCommunity con la home che puoi SCEGLIERE: tocca il titolo di una riga in home e apri le impostazioni del plugin per riordinare o nascondere le sezioni (preset Standard, Famiglia, Solo film, Solo serie). In cima Top 10 serie e Top 10 film, Tendenze di adesso, Aggiunti di recente, poi tutti i generi in ordine di tendenza e le annate in fondo. Ogni riga con scroll infinito: migliaia di titoli. Film e serie in italiano con 1080p FHD. Righe che si caricano sempre: richieste in sequenza e riprova automatica. Basato sul provider di doGior (GPL-3.0), con domini di riserva automatici."
     authors = listOf("antonydp", "doGior")
 
     /**

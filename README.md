@@ -38,7 +38,7 @@ poi premi **Aggiungi repository** e attendi qualche secondo.
 Nell'elenco compaiono **due plugin**:
 
 - **RetroCinema** — il catalogo curato: film d'epoca e nuovi, tutto verificato in italiano. *Consigliato per iniziare.*
-- **StreamingCommunity** — lo stesso sito che conosci, con la home organizzata come si deve: **Top 10 serie, Top 10 film, Tendenze di adesso, Aggiunti di recente**, poi tutti i generi **ordinati per tendenza** (commedie, storie d'amore, famiglia, animazione…) e in fondo le annate 2026/2025/2024. **Ogni riga a scroll infinito** con migliaia di titoli in italiano e 1080p FHD.
+- **StreamingCommunity** — lo stesso sito che conosci, con la home organizzata come si deve: **Top 10 serie, Top 10 film, Tendenze di adesso, Aggiunti di recente**, poi tutti i generi **ordinati per tendenza** (commedie, storie d'amore, famiglia, animazione…) e in fondo le annate 2026/2025/2024. **Ogni riga a scroll infinito** con migliaia di titoli in italiano e 1080p FHD. Ha anche un **menu impostazioni** per riordinare/nascondere le sezioni (vedi sotto).
 
 Tocca **Installa** su uno o entrambi e poi **OK**.
 
@@ -86,6 +86,21 @@ La **ricerca** parte dal catalogo italiano curato (istantanea), continua su Stre
 
 ---
 
+## ⚙️ Personalizza la home di StreamingCommunity
+
+Da ottobre 2026 il plugin StreamingCommunity ha un **menu impostazioni proprio**:
+
+1. Nella home dell'app, **tocca il titolo di una riga** di StreamingCommunity (es. *Top 10 serie*) — si apre il pannello del fornitore.
+2. Tocca il tasto **⚙️ / Impostazioni**.
+3. Nel menu puoi:
+   - usare i **preset rapidi**: *Standard*, *Famiglia* (famiglia/animazione/storie d'amore in cima), *Solo film*, *Solo serie*;
+   - **deselezionare** le sezioni da nascondere;
+   - **riordinare** con le frecce ▲▼ (le sezioni nascoste stanno in fondo, riattivandole entrano alla fine);
+   - **Ripristina** torna all'ordine predefinito.
+4. Tocca **Salva**: le modifiche valgono dal prossimo caricamento della home (tirala giù per aggiornare, o riapri l'app).
+
+Le scelte restano salvate sull'app anche dopo gli aggiornamenti del plugin.
+
 ## 🆘 Problemi comuni
 
 **"Non riesco ad aggiungere la repository"** — Alcuni gestori telefonici italiani bloccano gli indirizzi `raw.githubusercontent.com`. Attiva una **VPN qualsiasi** sul telefono solo per il momento in cui aggiungi la repository, poi la puoi disattivare.
@@ -93,6 +108,8 @@ La **ricerca** parte dal catalogo italiano curato (istantanea), continua su Stre
 **"Un film non parte"** — I titoli di RaiPlay vanno e vengono (i diritti scadono e ritornano). Prova un altro film della stessa riga: i cataloghi sono pieni. Su Internet Archive, se un film non parte prova il link con qualità più bassa (es. 480p).
 
 **"Il plugin non si aggiorna"** — Nell'app: *Impostazioni → Estensioni → (tocco lungo su RetroCinema) → Aggiorna*. Gli aggiornamenti sono automatici di default.
+
+**"Qualche riga non compare (a volte)"** — Dalla versione 3 il plugin StreamingCommunity carica le righe **una alla volta** e **riprova da solo** 3 volte le richieste rifiutate: se una sezione manca ancora, **aggiorna la home** (tira giù). Se il sito ha cambiato dominio, il plugin lo rileva da solo al primo avvio.
 
 ---
 
@@ -114,17 +131,21 @@ retrocinema/
 │       └── RetroCinemaPlugin.kt     ← registrazione del provider
 └── StreamingCommunity/         ← modulo 2 = plugin .cs3 StreamingCommunity completo
     └── src/main/kotlin/it/retrocinema/streamingcommunity/
-        ├── StreamingCommunity.kt      ← 24 righe in home, scroll infinito, ricerca paginata
-        ├── StreamingCommunityDTOs.kt  ← DTO Jackson tolleranti + query delle righe
-        ├── VixCloudExtractor.kt       ← player VixCloud (CloudflareKiller)
-        └── VixSrcExtractor.kt         ← fallback VixSrc (permalink tmdb)
+        ├── StreamingCommunity.kt       ← home dinamica, retry, sessione, ricerca paginata
+        ├── ScSections.kt               ← catalogo sezioni + preset + salvataggio scelte
+        ├── StreamingCommunitySettings.kt ← menu impostazioni (riordina/nasconde sezioni)
+        ├── StreamingCommunityDTOs.kt   ← DTO Jackson tolleranti + query delle righe
+        ├── VixCloudExtractor.kt        ← player VixCloud (CloudflareKiller)
+        └── VixSrcExtractor.kt          ← fallback VixSrc (permalink tmdb)
 ```
 
 ### Build automatica
 Ogni push su `main`/`master` avvia **GitHub Actions**: il workflow esegue `./gradlew make makePluginsJson`, copia i `.cs3` e il `plugins.json` generato nel branch **`builds`**. Il `repo.json` punta lì: l'app scarica sempre l'ultima build, con **aggiornamento automatico** (basta incrementare `version` nel `build.gradle.kts` del modulo).
 
 ### Come sono scelti i contenuti
-- **Plugin StreamingCommunity (modulo `StreamingCommunity/`)**: versione autonoma del provider HadEnough di doGior (GPL-3.0) con la homepage ordinata: **Top 10 serie + Top 10 film** (archivio `sort=views` + filtro `type`, ritagliati a 10: lo slider ufficiale top10 è misto e in alcuni giorni contiene solo serie) + slider ufficiali **Tendenze di adesso** e **Aggiunti di recente** + **17 generi ordinati per tendenza** (`sort=views`) + **3 annate** (2026/2025/2024) in fondo = **24 righe**, tutte tranne i Top 10 e gli slider a **scroll infinito fino a 17 pagine da 60 titoli** (il tetto reale del sito, oltre il quale l'API risponde 400 — verificato live). Filtri verificati: `genre[]` (array), `year` (singolo), `type` (singolo), `sort` (release_date/score/created_at/views/name). Sessione Inertia con failover automatico del dominio, doppio parser (JSON paginator + fallback HTML `data-page`), poster CDN con riserva TMDB.
+- **Plugin StreamingCommunity (modulo `StreamingCommunity/`)**: versione autonoma del provider HadEnough di doGior (GPL-3.0) con la homepage ordinata: **Top 10 serie + Top 10 film** (archivio `sort=views` + filtro `type`, ritagliati a 10: lo slider ufficiale top10 è misto e in alcuni giorni contiene solo serie) + slider ufficiali **Tendenze di adesso** e **Aggiunti di recente** + **17 generi ordinati per tendenza** (`sort=views`) + **3 annate** (2026/2025/2024) in fondo = **24 sezioni** (`ScSections.kt`), tutte tranne i Top 10 e gli slider a **scroll infinito fino a 17 pagine da 60 titoli** (il tetto reale del sito, oltre il quale l'API risponde 400 — verificato live). Filtri verificati: `genre[]` (array), `year` (singolo), `type` (singolo), `sort` (release_date/score/created_at/views/name). Sessione Inertia con failover automatico del dominio, doppio parser (JSON paginator + fallback HTML `data-page`), poster CDN con riserva TMDB.
+- **Menu impostazioni del plugin (v3)**: `Plugin.openSettings` (API CloudStream) apre un dialog nativo (`StreamingCommunitySettings.kt`) con preset rapidi, caselle di attivazione e frecce di riordino; le scelte vengono salvate come CSV di id con `DataStore` (`sc_home_sections_v1`) e il provider legge la lista in `mainPage` (getter dinamico con cache, invalidata al salvataggio).
+- **Stabilità della home (v3)**: `sequentialMainPage = true` — l'app carica le righe **in sequenza** invece che 24 in parallelo (le richieste simultanee venivano a volte scartate da Cloudflare/sito → righe sparite a intermittenza); ogni riga riprova fino a 3 volte con attesa crescente (`withRetries`); la sessione Inertia è protetta da un lock `AtomicBoolean` con refresh forzato (tasso limitato a 1 ogni 20 s) su 403/419/429 o payload HTML inatteso.
 - **Catalogo ITALIANO verificato (114 film)**: sono ammessi SOLO film di origine italiana (audio italiano garantito) oppure comiche mute. Ogni film è stato controllato automaticamente via API `metadata` di Internet Archive: deve esistere, essere un film (mediatype movies), avere un file MP4/MKV riproducibile da ExoPlayer, una durata da lungometraggio e superare i filtri anti-horror/anti-adulti. Le versioni scelte provengono da uploader con `language=ita` esplicito o da release con traccia ITA; titoli e anni vengono puliti e riportati all'originale italiano.
 - **RaiPlay** (legale, ufficiale, tutto in italiano): le righe usano le collezioni editoriali verificate `stanlioeollio-edizionirestaurate`, `grandiclassicidihollywood` (doppiati ITA), `ilgrandecinema` + **5 raccolte SSR** (Dal libro al film, Cinema ragazzi, 25 anni Rai Cinema, Film in esclusiva, Stefania Sandrelli): l'HTML pubblica le card con `data-layout="single"` (film) o `"multi"` (serie TV) — il plugin prende **solo i film** e scarta le serie. Si aggiornano da sole quando Rai cambia il catalogo. Gli item con genere *horror/erotico* vengono filtrati nel codice.
 - **StreamingCommunity** (fonte FMHY, via `ScSupport.kt`): il porting del provider HadEnough di doGior (GPL-3.0), riadattato: **SOLO FILM** (filtro `type=="movie"` su tutte le righe e sulla ricerca), generi scelti per la famiglia (Romance, Family, Comedy, Drama, Adventure, Animation — **niente Horror**), slider ufficiali del sito per le **nuove uscite** e il **Top 10**. La sessione Inertia (cookie + XSRF + versione) è gestita automaticamente; il dominio viene **auto-rilevato** tra quelli attuali (streamingunity.win → .vip → streamingcommunityz.red) così il plugin continua a funzionare quando il sito cambia indirizzo. Lo stream passa dal player VixCloud con **CloudflareKiller** (bypass Cloudflare integrato in CloudStream) e fallback VixSrc.

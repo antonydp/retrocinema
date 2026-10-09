@@ -6,7 +6,6 @@ package it.retrocinema.streamingcommunity
  */
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
 
 /** Riga della homepage: slider oppure archivio con filtri (genere/anno/tipo/ordine). */
 data class ArchiveQuery(
@@ -158,17 +157,3 @@ data class ScTrailer(
     fun getYoutubeUrl(): String? =
         youtubeId?.let { "https://www.youtube.com/watch?v=$it" }
 }
-
-/** Helper per costruire le righe della homepage. */
-internal fun archiveQuery(
-    label: String,
-    genre: Int? = null,
-    year: Int? = null,
-    type: String? = null,
-    sort: String? = null,
-    limit: Int? = null,
-): Pair<String, String> =
-    ArchiveQuery(kind = "archive", label = label, genre = genre, year = year, type = type, sort = sort, limit = limit).toJson() to label
-
-internal fun sliderQuery(slider: String, label: String): Pair<String, String> =
-    ArchiveQuery(kind = "slider", label = label, slider = slider).toJson() to label
