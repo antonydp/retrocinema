@@ -34,8 +34,13 @@ https://raw.githubusercontent.com/antonydp/retrocinema/main/repo.json
 
 poi premi **Aggiungi repository** e attendi qualche secondo.
 
-### Passo 4 — Installa RetroCinema
-Nell'elenco compare **un solo plugin: RetroCinema**. Tocca **Installa** e poi **OK**.
+### Passo 4 — Installa i plugin
+Nell'elenco compaiono **due plugin**:
+
+- **RetroCinema** — il catalogo curato: film d'epoca e nuovi, tutto verificato in italiano. *Consigliato per iniziare.*
+- **StreamingCommunity** — la versione "home estremamente ricca": oltre 30 file (Top 10, Tendenze, Aggiunti di recente, In arrivo, nuove uscite 2026/2025/2024, storie d'amore più belle, commedie più belle, famiglia e bambini, tutti i generi), **ogni riga a scroll infinito** con migliaia di titoli in italiano e 1080p FHD.
+
+Tocca **Installa** su uno o entrambi e poi **OK**.
 
 ### Passo 5 — Torna alla Home
 Tocca il nome del fornitore in alto sulla home (o il pulsante delle categorie), scegli **RetroCinema**: le file di film d'epoca scorrono come su Netflix. 🍿
@@ -101,18 +106,25 @@ retrocinema/
 ├── settings.gradle.kts         ← include automaticamente ogni cartella-plugin
 ├── repo.json                   ← il "catalogo" che l'app legge
 ├── .github/workflows/build.yml ← compilazione automatica a ogni push
-└── RetroCinema/                ← UN solo modulo = UN solo plugin .cs3
-    └── src/main/kotlin/com/retrocinema/
-        ├── RetroCinemaProvider.kt   ← tutta la logica (home, ricerca, load, link)
-        ├── ScSupport.kt             ← StreamingCommunity: sessione, DTO, estrattori VixCloud/VixSrc
-        ├── Catalogo.kt              ← catalogo verificato generato da script
-        └── RetroCinemaPlugin.kt     ← registrazione del provider
+├── RetroCinema/                ← modulo 1 = plugin .cs3 curato (solo film)
+│   └── src/main/kotlin/com/retrocinema/
+│       ├── RetroCinemaProvider.kt   ← tutta la logica (home, ricerca, load, link)
+│       ├── ScSupport.kt             ← StreamingCommunity: sessione, DTO, estrattori VixCloud/VixSrc
+│       ├── Catalogo.kt              ← catalogo verificato generato da script
+│       └── RetroCinemaPlugin.kt     ← registrazione del provider
+└── StreamingCommunity/         ← modulo 2 = plugin .cs3 "home estremamente ricca"
+    └── src/main/kotlin/it/retrocinema/streamingcommunity/
+        ├── StreamingCommunity.kt      ← 31 righe in home, scroll infinito, ricerca paginata
+        ├── StreamingCommunityDTOs.kt  ← DTO Jackson tolleranti + query delle righe
+        ├── VixCloudExtractor.kt       ← player VixCloud (CloudflareKiller)
+        └── VixSrcExtractor.kt         ← fallback VixSrc (permalink tmdb)
 ```
 
 ### Build automatica
 Ogni push su `main`/`master` avvia **GitHub Actions**: il workflow esegue `./gradlew make makePluginsJson`, copia i `.cs3` e il `plugins.json` generato nel branch **`builds`**. Il `repo.json` punta lì: l'app scarica sempre l'ultima build, con **aggiornamento automatico** (basta incrementare `version` nel `build.gradle.kts` del modulo).
 
 ### Come sono scelti i contenuti
+- **Plugin StreamingCommunity (modulo `StreamingCommunity/`)**: versione autonoma del provider HadEnough di doGior (GPL-3.0) con la homepage estremamente ricca: 4 slider ufficiali + 3 righe di nuove uscite per anno + 4 righe novità per gusto + 4 righe ordinate per voto + 16 generi = **31 righe**, tutte tranne gli slider a **scroll infinito fino a 17 pagine da 60 titoli** (il tetto reale del sito, oltre il quale l'API risponde 400 — verificato live). Filtri verificati: `genre[]` (array), `year` (singolo), `sort` (release_date/score/created_at/views/name), `type`. Sessione Inertia con failover automatico del dominio, doppio parser (JSON paginator + fallback HTML `data-page`), poster CDN con riserva TMDB.
 - **Catalogo ITALIANO verificato (114 film)**: sono ammessi SOLO film di origine italiana (audio italiano garantito) oppure comiche mute. Ogni film è stato controllato automaticamente via API `metadata` di Internet Archive: deve esistere, essere un film (mediatype movies), avere un file MP4/MKV riproducibile da ExoPlayer, una durata da lungometraggio e superare i filtri anti-horror/anti-adulti. Le versioni scelte provengono da uploader con `language=ita` esplicito o da release con traccia ITA; titoli e anni vengono puliti e riportati all'originale italiano.
 - **RaiPlay** (legale, ufficiale, tutto in italiano): le righe usano le collezioni editoriali verificate `stanlioeollio-edizionirestaurate`, `grandiclassicidihollywood` (doppiati ITA), `ilgrandecinema` + **5 raccolte SSR** (Dal libro al film, Cinema ragazzi, 25 anni Rai Cinema, Film in esclusiva, Stefania Sandrelli): l'HTML pubblica le card con `data-layout="single"` (film) o `"multi"` (serie TV) — il plugin prende **solo i film** e scarta le serie. Si aggiornano da sole quando Rai cambia il catalogo. Gli item con genere *horror/erotico* vengono filtrati nel codice.
 - **StreamingCommunity** (fonte FMHY, via `ScSupport.kt`): il porting del provider HadEnough di doGior (GPL-3.0), riadattato: **SOLO FILM** (filtro `type=="movie"` su tutte le righe e sulla ricerca), generi scelti per la famiglia (Romance, Family, Comedy, Drama, Adventure, Animation — **niente Horror**), slider ufficiali del sito per le **nuove uscite** e il **Top 10**. La sessione Inertia (cookie + XSRF + versione) è gestita automaticamente; il dominio viene **auto-rilevato** tra quelli attuali (streamingunity.win → .vip → streamingcommunityz.red) così il plugin continua a funzionare quando il sito cambia indirizzo. Lo stream passa dal player VixCloud con **CloudflareKiller** (bypass Cloudflare integrato in CloudStream) e fallback VixSrc.
