@@ -31,9 +31,9 @@ object ScSections {
         // --- In cima: top 10 separati per tipo ---
         ScSection("top_serie", "Top 10 serie", ArchiveQuery(kind = "archive", label = "Top 10 serie", type = "tv", sort = "views", limit = 10)),
         ScSection("top_film", "Top 10 film", ArchiveQuery(kind = "archive", label = "Top 10 film", type = "movie", sort = "views", limit = 10)),
-        // --- Slider ufficiali del sito ---
-        ScSection("trending", "Tendenze di adesso", ArchiveQuery(kind = "slider", label = "Tendenze di adesso", slider = "trending")),
-        ScSection("latest", "Aggiunti di recente", ArchiveQuery(kind = "slider", label = "Aggiunti di recente", slider = "latest")),
+        // --- Pagine browse ufficiali del sito (paginate: scroll infinito) ---
+        ScSection("trending", "Tendenze di adesso", ArchiveQuery(kind = "browse", label = "Tendenze di adesso", path = "/it/browse/trending")),
+        ScSection("latest", "Aggiunti di recente", ArchiveQuery(kind = "browse", label = "Aggiunti di recente", path = "/it/browse/latest")),
         // --- Generi ordinati per tendenza (scroll infinito) ---
         ScSection("gen_commedie", "Commedie", ArchiveQuery(kind = "archive", label = "Commedie", genre = 12, sort = "views")),
         ScSection("gen_storie_damore", "Storie d'amore", ArchiveQuery(kind = "archive", label = "Storie d'amore", genre = 15, sort = "views")),

@@ -7,11 +7,12 @@ package it.retrocinema.streamingcommunity
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 
-/** Riga della homepage: slider oppure archivio con filtri (genere/anno/tipo/ordine). */
+/** Riga della homepage: pagina browse oppure archivio con filtri (genere/anno/tipo/ordine). */
 data class ArchiveQuery(
-    val kind: String,            // "slider" | "archive"
+    val kind: String,            // "browse" | "archive"
     val label: String,           // nome della riga mostrato nell'app
-    val slider: String? = null,  // trending | latest
+    val path: String? = null,    // per kind="browse": pagina del sito (es. /it/browse/trending)
+    val slider: String? = null,  // storico (slider API): piu usato, tenuto per compatibilita JSON
     val genre: Int? = null,      // id genere (array nel sito)
     val year: Int? = null,       // anno di uscita (singolo nel sito)
     val type: String? = null,    // "movie" | "tv" (verificato live)

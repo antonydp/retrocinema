@@ -32,7 +32,6 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.parser.Parser
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -49,8 +48,11 @@ const val SC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/201
  * VixCloud/VixSrc) ma la home e riorganizzata e l'utente puo sceglierla:
  * dal menu impostazioni del plugin (gear in home) puo riordinare e
  * disattivare le sezioni (preset Standard/Famiglia/Solo film/Solo serie).
- * Ogni riga di archivio ha lo scroll infinito (17 pagine da 60 titoli,
- * lo stesso tetto che il sito impone ai clienti web).
+ * Tutte le righe hanno lo scroll infinito (17 pagine da 60 titoli, lo
+ * stesso tetto che il sito impone ai clienti web): anche "Tendenze di
+ * adesso" e "Aggiunti di recente" usano le pagine browse ufficiali del
+ * sito (/it/browse/trending e /it/browse/latest, paginate), NON piu lo
+ * slider API che dava una lista fissa di ~20 titoli.
  *
  * Stabilita: le righe della home vengono caricate IN SEQUENZA
  * (sequentialMainPage) invece che tutte insieme, ogni richiesta riprova
@@ -123,7 +125,9 @@ class StreamingCommunity : MainAPI() {
     //  1. Top 10 serie / Top 10 film: i piu visti (sort=views + filtro
     //     type, verificato live; lo slider ufficiale top10 e misto e un
     //     giorno puo contenere solo serie, quindi non lo usiamo)
-    //  2. Tendenze di adesso + Aggiunti di recente: slider ufficiali
+    //  2. Tendenze di adesso + Aggiunti di recente: le pagine browse
+    //     ufficiali del sito (/it/browse/trending e /it/browse/latest),
+    //     pagine da 60 titoli: scroll infinito come le altre righe
     //  3. Generi, tutti ordinati per tendenza (sort=views), scroll infinito
     //  4. Le annate 2026/2025/2024 in fondo
     //
@@ -299,9 +303,8 @@ class StreamingCommunity : MainAPI() {
         ensureSession()
 
         return when (query.kind) {
-            "slider" -> {
-                val sliderName = query.slider ?: return null
-                withRetries { attempt -> fetchSlider(sliderName, query.label, attempt) }
+            "browse" -> {
+                withRetries { attempt -> fetchBrowse(query, current, attempt) }
             }
             "archive" -> {
                 withRetries { attempt -> fetchArchive(query, current, attempt) }
@@ -310,14 +313,14 @@ class StreamingCommunity : MainAPI() {
         }
     }
 
-    private suspend fun fetchSlider(sliderName: String, label: String, attempt: Int): HomePageResponse? {
+    private suspend fun fetchBrowse(query: ArchiveQuery, page: Int, attempt: Int): HomePageResponse? {
         return try {
             if (attempt > 0) ensureSession(force = true)
-            val body = "{\"sliders\":[{\"name\":\"$sliderName\",\"genre\":null}]}"
-            val response = app.post(
-                "${siteRootUrl}api/sliders/fetch?lang=it",
+            val path = query.path ?: return null
+            val response = app.get(
+                siteRootUrl + path.removePrefix("/"),
+                params = mapOf("page" to page.toString()),
                 headers = sliderHeaders(),
-                requestBody = body.toRequestBody()
             )
             // 403/419/429: Cloudflare o limite del sito -> sessione fresca e riprova
             if (response.code == 403 || response.code == 419 || response.code == 429) {
@@ -325,19 +328,16 @@ class StreamingCommunity : MainAPI() {
                 return null
             }
             if (response.code !in 200..299) return null
-            val payload = response.body.string()
-            if (isHtmlPayload(payload)) {
-                ensureSession(force = true)
-                return null
-            }
-            val slider = runCatching { parseJson<List<ScSlider>>(payload) }
-                .getOrNull()?.firstOrNull() ?: return null
-            val items = searchResponseBuilder(slider.titles)
+            // Pagina oltre l'ultima: il sito risponde 200 con titoli vuoti
+            // -> null e l'app smette di paginare (comportamento corretto)
+            val titles = parseArchiveTitles(response.body.string())
+            if (titles.isEmpty()) return null
+            val items = searchResponseBuilder(titles)
             if (items.isEmpty()) return null
-            // Etichetta italiana nostra al posto di quella inglese del sito
+            val hasNext = titles.size >= PAGE_SIZE && page < MAX_PAGE
             newHomePageResponse(
-                HomePageList(label, items, isHorizontalImages = false),
-                hasNext = false
+                HomePageList(query.label, items),
+                hasNext = hasNext
             )
         } catch (e: Exception) {
             null
