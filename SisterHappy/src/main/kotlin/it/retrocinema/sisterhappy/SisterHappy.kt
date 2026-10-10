@@ -16,6 +16,7 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.network.CloudflareKiller
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -352,7 +353,7 @@ class SisterHappy : MainAPI() {
         // decine di richieste e l'app resta "in caricamento" per minuti.
         val budget = ShBudget(
             maxRequests = 20,
-            deadline = System.currentTimeMillis() + 35_000,
+            deadline = System.currentTimeMillis() + 80_000,
         )
         // Il challenge Cloudflare a volte viene risolto solo al secondo colpo:
         // se il primo pass non ha emesso nulla si ritenta con il budget residuo.
@@ -369,15 +370,10 @@ class SisterHappy : MainAPI() {
         var found = false
         for (link in links) {
             if (link.url.isBlank()) continue
-            var emitted = false
-            val wrapped: (ExtractorLink) -> Unit = { l ->
-                emitted = true
-                found = true
-                callback(l)
-            }
-            runCatching {
-                resolveAndExtract(link.url, subtitleCallback, wrapped, budget)
-            }
+            val ok = runCatching {
+                resolveAndExtract(link.url, subtitleCallback, callback, budget)
+            }.getOrDefault(false)
+            if (ok) found = true
         }
         return found
     }
@@ -388,24 +384,67 @@ class SisterHappy : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
         budget: ShBudget,
-    ) {
-        if (!budget.can()) return
-        val finalUrl = walkProtector(url, 0, budget) ?: return
+    ): Boolean {
+        if (!budget.can()) return false
+        var emitted = false
+        val wrapped: (ExtractorLink) -> Unit = { l ->
+            emitted = true
+            callback(l)
+        }
+        // 1. Risoluzione HTTP veloce (AJAX / redirect / parsing), poi ultima
+        //    spiaggia: WebView invisibile che esegue il JavaScript del protettore
+        //    esattamente come fa il browser (challenge Cloudflare, countdown,
+        //    redirect JS) e si ferma sul primo host video incontrato.
+        val finalUrl = walkProtector(url, 0, budget) ?: webviewResolve(url, budget) ?: return false
         when {
             finalUrl.contains("maxstream", ignoreCase = true) ->
-                MaxStreamExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
+                MaxStreamExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, wrapped)
             finalUrl.contains("mixdrop", ignoreCase = true) ->
-                MixDropExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
+                MixDropExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, wrapped)
             finalUrl.contains("deltabit", ignoreCase = true) ->
-                DeltaBitExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
+                DeltaBitExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, wrapped)
             else -> {
                 // Host non noto: prova gli estrattori registrati dall'app, poi il link diretto
                 val handled = runCatching {
-                    loadExtractor(finalUrl, mainUrl, subtitleCallback, callback)
+                    loadExtractor(finalUrl, mainUrl, subtitleCallback, wrapped)
                 }.getOrDefault(false)
-                if (!handled) emitDirectLink(finalUrl, callback)
+                if (!handled) emitDirectLink(finalUrl, wrapped)
             }
         }
+        // 2. Se l'estrattore HTTP dell'host finale non ha emesso nulla (es. il
+        //    player richiede JS), WebView profonda fino al file video vero e proprio
+        if (!emitted && budget.can()) {
+            val direct = webviewResolve(finalUrl, budget, videoOnly = true)
+            if (direct != null) emitDirectLink(direct, wrapped)
+        }
+        return emitted
+    }
+
+    /**
+     * "Come il browser": una WebView invisibile naviga il link eseguendo TUTTO il
+     * JavaScript (challenge Cloudflare, countdown, redirect costruiti via JS) e la
+     * navigazione viene fermata alla prima richiesta utile:
+     * - videoOnly=false: prima richiesta verso un host video (pagina player)
+     * - videoOnly=true: primo file video (.m3u8/.mp4/.mkv) richiesto dal player
+     * Se useOkhttp=false la WebView fa tutte le richieste da se', come un browser
+     * vero (richiesto per Cloudflare, vedi documentazione WebViewResolver).
+     */
+    private suspend fun webviewResolve(url: String, budget: ShBudget, videoOnly: Boolean = false): String? {
+        if (!budget.can()) return null
+        val intercept = if (videoOnly) {
+            Regex("\\.m3u8|\\.mp4|\\.mkv", RegexOption.IGNORE_CASE)
+        } else {
+            Regex("maxstream|deltabit|mixdrop|\\.m3u8|\\.mp4", RegexOption.IGNORE_CASE)
+        }
+        val resolver = WebViewResolver(
+            interceptUrl = intercept,
+            useOkhttp = false,
+            timeout = 25_000L,
+        )
+        return runCatching {
+            val (finalReq, _) = resolver.resolveUsingWebView(url, referer = mainUrl, requestCallBack = { true })
+            finalReq?.url?.toString()
+        }.getOrNull()
     }
 
     /**
