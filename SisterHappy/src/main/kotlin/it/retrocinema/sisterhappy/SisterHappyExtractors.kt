@@ -10,13 +10,45 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
-/** User-Agent desktop condiviso dagli estrattori. */
-private const val EXT_UA = SH_UA
+/**
+ * Header "full browser" condivisi (pattern MammaMia): la Cloudflare di uprot.net /
+ * maxstream.video / clicka.cc risponde 403 senza Sec-Fetch-*, DNT, Priority e
+ * Upgrade-Insecure-Requests.
+ */
+fun shFullHeaders(referer: String): Map<String, String> = mapOf(
+    "User-Agent" to SH_UA,
+    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language" to "en-US,en;q=0.5",
+    "Sec-GPC" to "1",
+    "Connection" to "keep-alive",
+    "Upgrade-Insecure-Requests" to "1",
+    "Sec-Fetch-Dest" to "document",
+    "Sec-Fetch-Mode" to "navigate",
+    "Sec-Fetch-Site" to "cross-site",
+    "Sec-Fetch-User" to "?1",
+    "DNT" to "1",
+    "Priority" to "u=0, i",
+    "Referer" to referer,
+)
+
+/** Catena di regex m3u8 (stessa priorita' di MammaMia: sources/src -> file|src|url -> qualunque). */
+fun shFindM3u8(body: String): String? =
+    Regex("sources:\\s*\\[\\s*\\{\\s*src:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"")
+        .find(body)?.groupValues?.get(1)
+        ?: Regex(
+            "(?:file|src|url)\\s*[:=]\\s*[\"'](https?://[^\"']+\\.m3u8[^\"']*)[\"']",
+            RegexOption.IGNORE_CASE
+        ).find(body)?.groupValues?.get(1)
+        ?: Regex("https?://[^\"'<>\\s]+\\.m3u8[^\"'<>\\s]*")
+            .find(body)?.value
 
 /**
- * MaxStream: pagina player con script "eval(function(p,a,c,k,e,d)...)" da spacchettare;
- * dentro c'e src:"https://...m3u8". (logica da provider CB01 GPL di DieGon7771,
- * estesa con regex di riserva).
+ * MaxStream. Due forme supportate:
+ * 1. /uprots/<id> (link ottenuto da uprot): GET con redirect seguiti (uprots ->
+ *    watchfree -> player) e m3u8 nel body finale; fallback: ricostruzione
+ *    /emvvv/<id> dal path watchfree (trucco MammaMia) o iframe maxstream;
+ * 2. pagina player legacy con script "eval(function(p,a,c,k,e,d)...)" da
+ *    spacchettare (logica da provider CB01 GPL di DieGon7771).
  */
 class MaxStreamExtractor : ExtractorApi() {
     override var name = "MaxStream"
@@ -29,36 +61,84 @@ class MaxStreamExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
-        val headers = mapOf(
-            "Accept" to "*/*",
-            "Connection" to "keep-alive",
-            "User-Agent" to EXT_UA,
-            "Accept-Language" to "it-IT,it;q=0.9,en;q=0.5",
-            "Cache-Control" to "max-age=0",
-            "Upgrade-Insecure-Requests" to "1",
-        )
-        val response = app.get(url, headers = headers, timeout = 15_000)
+        if (url.contains("/uprots/", ignoreCase = true)) {
+            extractFromUprots(url, callback)
+        } else {
+            extractLegacy(url, referer, callback)
+        }
+    }
+
+    /** Catena moderna: uprots -> (redirect) -> watchfree -> player -> m3u8. */
+    private suspend fun extractFromUprots(url: String, callback: (ExtractorLink) -> Unit) {
+        val headers = shFullHeaders(referer = "https://uprot.net/")
+        val response = runCatching {
+            app.get(url, headers = headers, timeout = 20_000)
+        }.getOrNull() ?: return
+        if (response.code != 200) {
+            Log.d(name, "uprots GET status ${response.code}")
+            return
+        }
+        val body = response.text
+        val finalUrl = runCatching { response.url }.getOrDefault(url)
+
+        // Caso comune: m3u8 gia' nel body finale della catena
+        shFindM3u8(body)?.let { emit(it, callback); return }
+
+        // Fallback: watchfree/<x>/<y>/ -> /emvvv/<y> (pagina player reale)
+        val watchfreeUrl = if (finalUrl.contains("watchfree/")) finalUrl
+        else Regex("https?://[\\w.-]*maxstream\\.video/watchfree/[^\\s'\"<>]+", RegexOption.IGNORE_CASE)
+            .find(body)?.value
+        if (watchfreeUrl != null) {
+            val parts = watchfreeUrl.substringAfter("watchfree/").trimEnd('/').split('/')
+            if (parts.size >= 2 && parts[1].isNotBlank()) {
+                val playerUrl = "https://maxstream.video/emvvv/${parts[1]}"
+                val playerResp = runCatching {
+                    app.get(playerUrl, headers = shFullHeaders(referer = finalUrl), timeout = 20_000)
+                }.getOrNull()
+                if (playerResp != null && playerResp.code == 200) {
+                    shFindM3u8(playerResp.text)?.let { emit(it, callback); return }
+                }
+            }
+        }
+
+        // Fallback: iframe maxstream nel body finale
+        Regex(
+            "<iframe[^>]+src=['\"](https?://[^'\"]*maxstream[^'\"]*?/[a-z0-9_-]+/[a-z0-9]+)['\"]",
+            RegexOption.IGNORE_CASE
+        ).find(body)?.groupValues?.get(1)?.let { iframe ->
+            val iframeResp = runCatching {
+                app.get(iframe, headers = shFullHeaders(referer = finalUrl), timeout = 20_000)
+            }.getOrNull()
+            if (iframeResp != null && iframeResp.code == 200) {
+                shFindM3u8(iframeResp.text)?.let { emit(it, callback); return }
+                unpackSource(iframeResp.text)?.let { emit(it, callback); return }
+            }
+        }
+
+        // Ultima spiaggia: script packed nella pagina finale
+        unpackSource(body)?.let { emit(it, callback) }
+    }
+
+    /** Forma legacy: pagina player con evalpacked (vecchio formato). */
+    private suspend fun extractLegacy(
+        url: String,
+        referer: String?,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        val response = runCatching {
+            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 15_000)
+        }.getOrNull() ?: return
         val body = response.body.string()
 
-        val src = unpackSource(body)
+        val src = shFindM3u8(body) ?: unpackSource(body)
         if (src.isNullOrBlank()) {
             Log.d(name, "Nessuna sorgente trovata in $url")
             return
         }
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name = name,
-                url = src,
-                type = ExtractorLinkType.M3U8,
-            ) {
-                this.referer = referer ?: ""
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        emit(src, callback)
     }
 
-    /** Spacchetta l'evalpacked se presente, poi cerca src:/file:/source:. */
+    /** Spacchetta l'evalpacked se presente, poi cerca src:/file:. */
     private fun unpackSource(body: String): String? {
         val candidates = mutableListOf<String>()
         if (body.contains("eval(function(p,a,c,k,e,d)")) {
@@ -78,15 +158,29 @@ class MaxStreamExtractor : ExtractorApi() {
         }
         return null
     }
+
+    private suspend fun emit(src: String, callback: (ExtractorLink) -> Unit) {
+        callback.invoke(
+            newExtractorLink(
+                source = name,
+                name = name,
+                url = src,
+                type = ExtractorLinkType.M3U8,
+            ) {
+                this.referer = "https://maxstream.video/"
+                this.quality = Qualities.Unknown.value
+            }
+        )
+    }
 }
 
 /**
- * DeltaBit: pagina player (domini deltabbit vari) con sorgente dentro jwplayer
- * o script packed. Estrazione tollerante: unpack -> file:/sources -> <source> -> mp4/m3u8 grezzi.
+ * DeltaBit: pagina player (domini deltabit vari, finali della catena clicka/adelta)
+ * con sorgente dentro jwplayer o script packed. Estrazione tollerante.
  */
 class DeltaBitExtractor : ExtractorApi() {
     override var name = "DeltaBit"
-    override var mainUrl = "https://deltabit.to/"
+    override var mainUrl = "https://deltabit.co/"
     override val requiresReferer = false
 
     override suspend fun getUrl(
@@ -95,16 +189,13 @@ class DeltaBitExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
-        val headers = mapOf(
-            "User-Agent" to EXT_UA,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "it-IT,it;q=0.9,en;q=0.5",
-            "Referer" to (referer ?: mainUrl),
-        )
-        val response = app.get(url, headers = headers, timeout = 15_000)
+        val response = runCatching {
+            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 15_000)
+        }.getOrNull() ?: return
         val body = response.body.string()
 
-        val link = findVideo(body)
+        val link = shFindM3u8(body)
+            ?: findOtherSource(body)
         if (link.isNullOrBlank()) {
             Log.d(name, "Nessuna sorgente trovata in $url")
             return
@@ -123,7 +214,7 @@ class DeltaBitExtractor : ExtractorApi() {
         )
     }
 
-    private fun findVideo(body: String): String? {
+    private fun findOtherSource(body: String): String? {
         val texts = mutableListOf<String>()
         if (body.contains("eval(function(p,a,c,k,e,d)")) {
             runCatching {
@@ -164,13 +255,13 @@ class MixDropExtractor : ExtractorApi() {
     ) {
         // Le pagine player sono sotto /e/; /f/ e la pagina di download
         val playerUrl = url.replace("/f/", "/e/")
-        val headers = mapOf(
-            "User-Agent" to EXT_UA,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "it-IT,it;q=0.9,en;q=0.5",
-            "Referer" to (referer ?: mainUrl),
-        )
-        val response = app.get(playerUrl, headers = headers, timeout = 15_000)
+        val response = runCatching {
+            app.get(
+                playerUrl,
+                headers = shFullHeaders(referer = referer ?: mainUrl),
+                timeout = 15_000,
+            )
+        }.getOrNull() ?: return
         val body = response.body.string()
 
         val link = findVideo(body)

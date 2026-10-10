@@ -18,6 +18,8 @@ import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.loadExtractor
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
@@ -50,7 +52,8 @@ data class ShEpisodeData(
  * - i link passano da protettori (uprot.net, clicka.cc) che nascondono gli host video
  *
  * Il flusso: load() elenca stagioni ed episodi; loadLinks() risolve ogni protettore
- * (redirect 302 -> form POST -> meta refresh / JS) e delega all'host video finale.
+ * seguendo la catena reale (uprot -> maxstream/uprots, clicka -> safego -> adelta ->
+ * deltabit) e delega all'estrattore dell'host finale.
  */
 class SisterHappy : MainAPI() {
     override var name = "SisterHappy"
@@ -63,12 +66,24 @@ class SisterHappy : MainAPI() {
         /** Pagina unica della serie gestita da questo plugin. */
         const val SHOW_PATH = "/x-factor-53/"
 
-        /** Host che mascherano i link veri (protettori). */
-        private val PROTECTOR_HOSTS = listOf("uprot.net", "clicka.cc")
+        /** Host che mascherano i link veri (protettori, livello captcha incluso). */
+        private val PROTECTOR_HOSTS = listOf("uprot.net", "clicka.cc", "safego.cc")
 
         /** Prefissi di pagina del sito che NON sono pagine serie: tolti dalla ricerca. */
         private val NON_SHOW_PREFIXES = listOf(
             "category", "elenco-", "guida-", "richieste", "nuovi-ep", "tag", "author", "page"
+        )
+
+        /** URL finali riconosciuti come "foglia" (host video o pagina player). */
+        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop")
+
+        private val UPROTS_RE =
+            Regex("https?://[\\w.-]*maxstream\\.video/uprots/[A-Za-z0-9=]+", RegexOption.IGNORE_CASE)
+        private val ADELTA_RE =
+            Regex("https?://[\\w.-]*clicka\\.cc/adelta/[A-Za-z0-9=]+", RegexOption.IGNORE_CASE)
+        private val ANCHOR_RE = Regex(
+            "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
         )
     }
 
@@ -83,6 +98,40 @@ class SisterHappy : MainAPI() {
         )
         return if (referer != null) base + mapOf("Referer" to referer) else base
     }
+
+    /**
+     * Header "full browser" (pattern MammaMia): senza Sec-Fetch-*, DNT, Priority e
+     * Upgrade-Insecure-Requests la Cloudflare dei protettori risponde 403 anche con
+     * fingerprint browser. Sec-Fetch-Site viene allineato al rapporto tra target e referer.
+     */
+    private fun fullHeaders(referer: String? = null, origin: String? = null): Map<String, String> {
+        val headers = mutableMapOf(
+            "User-Agent" to SH_UA,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language" to "en-US,en;q=0.5",
+            "Sec-GPC" to "1",
+            "Connection" to "keep-alive",
+            "Upgrade-Insecure-Requests" to "1",
+            "Sec-Fetch-Dest" to "document",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "none",
+            "Sec-Fetch-User" to "?1",
+            "DNT" to "1",
+            "Priority" to "u=0, i",
+        )
+        if (origin != null) headers["Origin"] = origin
+        if (referer != null) {
+            headers["Referer"] = referer
+            val refHost = referer.toHttpUrlOrNull()?.host
+            val targetHost = headers["Origin"]?.toHttpUrlOrNull()?.host
+            headers["Sec-Fetch-Site"] = if (refHost != null && refHost == targetHost) "same-origin" else "cross-site"
+        }
+        return headers
+    }
+
+    private suspend fun getNoRedirect(url: String, headers: Map<String, String>) = runCatching {
+        app.get(url, allowRedirects = false, headers = headers, timeout = 20_000, interceptor = cfKiller)
+    }.getOrNull()
 
     // ------------------------------------------------------------------
     //  HOME: una sola riga con la scheda della serie
@@ -270,14 +319,14 @@ class SisterHappy : MainAPI() {
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (com.lagradost.cloudstream3.utils.ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episode = tryParseJson<ShEpisodeData>(data) ?: return false
         var found = false
         for (link in episode.links) {
             if (link.url.isBlank()) continue
             var emitted = false
-            val wrapped: (com.lagradost.cloudstream3.utils.ExtractorLink) -> Unit = { l ->
+            val wrapped: (ExtractorLink) -> Unit = { l ->
                 emitted = true
                 found = true
                 callback(l)
@@ -285,9 +334,6 @@ class SisterHappy : MainAPI() {
             runCatching {
                 resolveAndExtract(link.url, subtitleCallback, wrapped)
             }
-            // Un host riuscito basta? No: si provano TUTTI i link dell'episodio,
-            // l'app mostra sorgenti multiple e sceglie la migliore.
-            if (emitted) continue
         }
         return found
     }
@@ -296,9 +342,9 @@ class SisterHappy : MainAPI() {
     private suspend fun resolveAndExtract(
         url: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (com.lagradost.cloudstream3.utils.ExtractorLink) -> Unit,
+        callback: (ExtractorLink) -> Unit,
     ) {
-        val finalUrl = if (isProtector(url)) resolveProtector(url) ?: return else url
+        val finalUrl = walkProtector(url, 0) ?: return
         when {
             finalUrl.contains("maxstream", ignoreCase = true) ->
                 MaxStreamExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
@@ -306,14 +352,125 @@ class SisterHappy : MainAPI() {
                 MixDropExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
             finalUrl.contains("deltabit", ignoreCase = true) ->
                 DeltaBitExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
-            else -> emitDirectLink(finalUrl, callback)
+            else -> {
+                // Host non noto: prova gli estrattori registrati dall'app, poi il link diretto
+                val handled = runCatching {
+                    loadExtractor(finalUrl, mainUrl, subtitleCallback, callback)
+                }.getOrDefault(false)
+                if (!handled) emitDirectLink(finalUrl, callback)
+            }
         }
     }
 
-    /** Se il protettore reindirizza dritto a un file video, lo emette senza estrattore. */
+    /**
+     * Cammina la catena dei protettori fino all'URL "foglia" (host video o pagina player).
+     * uprot.net -> maxstream.video/uprots/... (o clicka/adelta), clicka.cc -> deltabit,
+     * con livello captcha safego.cc quando presente.
+     */
+    private suspend fun walkProtector(url: String, hops: Int): String? {
+        if (hops > 6) return null
+        return when {
+            LEAF_HOSTS.any { url.contains(it, true) } -> url
+            url.contains("uprot.net", true) -> walkUprot(url, hops)
+            url.contains("clicka.cc", true) || url.contains("safego.cc", true) -> walkClicka(url, hops)
+            else -> url // host diretto non noto: il chiamante prova gli estrattori dell'app
+        }
+    }
+
+    /**
+     * uprot.net: trucco MammaMia "msf -> mse" (la variante /mse/ NON mostra il captcha),
+     * poi 30x o pagina con anchor CONTINUE verso maxstream/uprots o clicka/adelta.
+     */
+    private suspend fun walkUprot(url: String, hops: Int): String? {
+        val probe = if (url.contains("/msf/")) url.replace("/msf/", "/mse/") else url
+        val headers = fullHeaders(referer = "https://uprot.net/")
+        val resp = getNoRedirect(probe, headers) ?: return null
+
+        val location = resp.headers["location"]
+        if (!location.isNullOrBlank()) {
+            return walkProtector(absolutize(probe, location), hops + 1)
+        }
+
+        val html = resp.text
+        if (isCaptchaPage(html)) return null
+        followContinue(html, probe, hops)?.let { return it }
+        // Fallback: primo URL uprots/adelta grezzo nel body
+        UPROTS_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
+        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
+        extractDestination(html)?.let { return walkProtector(absolutize(probe, it), hops + 1) }
+        return null
+    }
+
+    /** clicka.cc (e safego.cc): 30x verso safego/adelta/deltabit oppure pagina con link adelta. */
+    private suspend fun walkClicka(url: String, hops: Int): String? {
+        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://clicka.cc"))
+            ?: return null
+        val location = resp.headers["location"]
+        if (!location.isNullOrBlank()) {
+            val next = absolutize(url, location)
+            if (next.contains("safego", ignoreCase = true)) {
+                return walkSafego(next, hops)
+            }
+            return walkProtector(next, hops + 1)
+        }
+
+        val html = resp.text
+        if (isCaptchaPage(html)) return null
+        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
+        followContinue(html, url, hops)?.let { return it }
+        extractDestination(html)?.let { return walkProtector(absolutize(url, it), hops + 1) }
+        return null
+    }
+
+    /** Livello captcha safego.cc: se l'IP e gia noto, reindirizza o contiene il link adelta. */
+    private suspend fun walkSafego(url: String, hops: Int): String? {
+        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://safego.cc"))
+            ?: return null
+        val location = resp.headers["location"]
+        if (!location.isNullOrBlank()) {
+            return walkProtector(absolutize(url, location), hops + 1)
+        }
+        val html = resp.text
+        if (isCaptchaPage(html)) return null
+        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
+        followContinue(html, url, hops)?.let { return it }
+        return null
+    }
+
+    /**
+     * Anchor con testo CONTINUE: quello reale punta a maxstream/clicka/uprots/adelta
+     * (le pagine possono contenere URL esca nascosti, quindi hanno priorita' i filtrati).
+     */
+    private suspend fun followContinue(html: String, baseUrl: String, hops: Int): String? {
+        val filtered = mutableListOf<String>()
+        val generic = mutableListOf<String>()
+        ANCHOR_RE.findAll(html).forEach { m ->
+            val href = m.groupValues[1]
+            val text = m.groupValues[2].replace(Regex("\\s+"), "").uppercase()
+            if (text.contains("CONTINUE")) {
+                if (listOf("maxstream", "clicka", "uprots", "adelta", "safego")
+                        .any { href.contains(it, true) }
+                ) filtered.add(href) else generic.add(href)
+            }
+        }
+        for (href in filtered + generic) {
+            val dest = walkProtector(absolutize(baseUrl, href), hops + 1)
+            if (dest != null) return dest
+        }
+        return null
+    }
+
+    /** Pagina captcha (immagine base64 senza nessun link utile): inutile insistere. */
+    private fun isCaptchaPage(body: String): Boolean {
+        val hasImage = body.contains("data:image", ignoreCase = true)
+        val hasTarget = UPROTS_RE.containsMatchIn(body) || ADELTA_RE.containsMatchIn(body)
+        return hasImage && !hasTarget
+    }
+
+    /** Se la catena finisce dritto su un file video, lo emette senza estrattore. */
     private suspend fun emitDirectLink(
         url: String,
-        callback: (com.lagradost.cloudstream3.utils.ExtractorLink) -> Unit,
+        callback: (ExtractorLink) -> Unit,
     ) {
         val lower = url.substringBefore('?').lowercase()
         val type = when {
@@ -335,84 +492,8 @@ class SisterHappy : MainAPI() {
         )
     }
 
-    private fun isProtector(url: String): Boolean {
-        val host = url.toHttpUrlOrNull()?.host?.lowercase() ?: return false
-        return PROTECTOR_HOSTS.any { host == it || host.endsWith(".$it") }
-    }
-
-    /**
-     * Risolutore multi-strategia per i protettori di link (uprot.net, clicka.cc):
-     * 1. catena di redirect 302 (i protettori spesso reindirizzano subito all'host);
-     * 2. pagina HTML: meta refresh, location.replace / location.href, anchor verso host video;
-     * 3. form POST con campi nascosti (pulsante "continua") -> si posta e si ricomincia.
-     * Con bypass Cloudflare per la pagina interstiziale.
-     */
-    private suspend fun resolveProtector(url: String): String? {
-        val referer = mainUrl + SHOW_PATH
-
-        // --- Strategia 1: catena di redirect senza seguire i redirect automaticamente
-        var current = url
-        var hops = 0
-        while (hops < 6) {
-            val resp = runCatching {
-                app.get(
-                    current,
-                    allowRedirects = false,
-                    headers = navHeaders(referer),
-                    timeout = 15_000,
-                    interceptor = cfKiller,
-                )
-            }.getOrNull() ?: return null
-            val location = resp.headers["location"]
-            if (location.isNullOrBlank()) break
-            val next = absolutize(current, location)
-            if (!isProtector(next)) return next
-            current = next
-            hops++
-        }
-
-        // --- Strategia 2: pagina HTML (meta refresh / JS / anchor / form POST)
-        val page = runCatching {
-            app.get(
-                current,
-                headers = navHeaders(referer),
-                timeout = 20_000,
-                interceptor = cfKiller,
-            )
-        }.getOrNull() ?: return null
-        val html = page.text
-
-        extractDestination(html)?.let { return it }
-
-        // --- Strategia 3: form POST con campi nascosti
-        val form = parseHiddenForm(html)
-        if (form != null) {
-            val (action, fields) = form
-            val postUrl = if (action.isBlank()) current else absolutize(current, action)
-            val postHeaders = navHeaders(referer).toMutableMap()
-            postHeaders["Content-Type"] = "application/x-www-form-urlencoded"
-            current.toHttpUrlOrNull()?.let { postHeaders["Origin"] = "${it.scheme}://${it.host}" }
-            val postResp = runCatching {
-                app.post(
-                    postUrl,
-                    data = fields,
-                    headers = postHeaders,
-                    timeout = 20_000,
-                    interceptor = cfKiller,
-                )
-            }.getOrNull() ?: return null
-            extractDestination(postResp.text)?.let { return it }
-            val loc = postResp.headers["location"]
-            if (!loc.isNullOrBlank() && !isProtector(absolutize(postUrl, loc))) {
-                return absolutize(postUrl, loc)
-            }
-        }
-        return null
-    }
-
-    /** Cerca nel codice HTML la destinazione reale del protettore. */
+    /** Cerca nel codice HTML una destinazione (meta refresh / JS / anchor verso host noto). */
     private fun extractDestination(html: String): String? {
-        // meta refresh: <meta http-equiv="refresh" content="5; url=https://...">
         Regex(
             "http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*content\\s*=\\s*[\"'][^\"']*url=([^\"'>]+)",
             RegexOption.IGNORE_CASE
@@ -421,49 +502,15 @@ class SisterHappy : MainAPI() {
             "content\\s*=\\s*[\"'][^\"']*url=([^\"'>]+)[\"'][^>]*http-equiv\\s*=\\s*[\"']refresh[\"']",
             RegexOption.IGNORE_CASE
         ).find(html)?.groupValues?.get(1)?.trim()?.let { return it }
-
-        // JS: location.replace("...") / location.href = "..." / window.location = "..."
         Regex(
             "(?:window\\.)?location(?:\\.href|\\.replace\\(\\s*)?\\s*[=(]\\s*[\"']([^\"']+)[\"']",
             RegexOption.IGNORE_CASE
         ).find(html)?.groupValues?.get(1)?.trim()?.let { if (it.startsWith("http")) return it }
-
-        // Anchor o URL grezzo verso un host video noto
-        val hostRe = Regex(
-            "https?://[\\w.-]*(?:maxstream|mixdrop|deltabit)[\\w.-]*/[^\"'<>\\s]*",
-            RegexOption.IGNORE_CASE
-        )
-        hostRe.find(html)?.value?.let { return it }
-
-        return null
-    }
-
-    /** Estrae la prima form POST della pagina con i suoi campi nascosti. */
-    private fun parseHiddenForm(html: String): Pair<String, Map<String, String>>? {
-        val formRe = Regex(
-            "<form[^>]*method\\s*=\\s*[\"']post[\"'][^>]*>",
-            RegexOption.IGNORE_CASE
-        )
-        val open = formRe.find(html) ?: return null
-        val tag = open.value
-        val action = Regex("action\\s*=\\s*[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE)
-            .find(tag)?.groupValues?.get(1)?.trim() ?: ""
-        val end = html.indexOf("</form>", open.range.last)
-        if (end < 0) return null
-        val inner = html.substring(open.range.last, end)
-        val fields = mutableMapOf<String, String>()
         Regex(
-            "<input[^>]*type\\s*=\\s*[\"']hidden[\"'][^>]*>",
+            "https?://[\\w.-]*(?:maxstream|mixdrop|deltabit|streamtape|voe)[\\w.-]*/[^\"'<>\\s]*",
             RegexOption.IGNORE_CASE
-        ).findAll(inner).forEach { inputTag ->
-            val name = Regex("name\\s*=\\s*[\"']([^\"']+)[\"']")
-                .find(inputTag.value)?.groupValues?.get(1) ?: return@forEach
-            val value = Regex("value\\s*=\\s*[\"']([^\"']*)[\"']")
-                .find(inputTag.value)?.groupValues?.get(1) ?: ""
-            fields[name] = value
-        }
-        if (fields.isEmpty()) return null
-        return action to fields
+        ).find(html)?.value?.let { return it }
+        return null
     }
 
     /** Risolve href relativi rispetto alla pagina corrente. */
