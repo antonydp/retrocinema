@@ -10,18 +10,16 @@ import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ShowStatus
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.amap
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newTvSeriesSearchResponse
-import com.lagradost.cloudstream3.network.CloudflareKiller
-import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
@@ -46,22 +44,6 @@ data class ShEpisodeData(
 )
 
 /**
- * Tetto rigido per una singola loadLinks: senza limite i tentativi di riserva
- * (anchor generici, varianti mse/msf, secondo pass) possono catenare decine di
- * richieste e l'app resta "in caricamento" per minuti. Ogni URL viene richiesto
- * AL MASSIMO UNA VOLTA per episodio e si rispettano scadenza e conteggio.
- */
-private class ShBudget(val maxRequests: Int, val deadline: Long) {
-    var used = 0
-    val visited = mutableSetOf<String>()
-
-    fun can(): Boolean = used < maxRequests && System.currentTimeMillis() < deadline
-
-    /** Registra l'URL: false se era gia' stato richiesto (da non richiedere di nuovo). */
-    fun mark(url: String): Boolean = visited.add(url.substringBefore('#'))
-}
-
-/**
  * SisterHappy - estensione dedicata a UNA sola serie TV italiana.
  *
  * La pagina del sito e una classica pagina "serie" WordPress:
@@ -71,9 +53,18 @@ private class ShBudget(val maxRequests: Int, val deadline: Long) {
  *     "15x01 Audizioni 1 - <a href=protettore>MaxStream</a> - <a>DeltaBit</a>"
  * - i link passano da protettori (uprot.net, clicka.cc) che nascondono gli host video
  *
- * Il flusso: load() elenca stagioni ed episodi; loadLinks() risolve ogni protettore
- * seguendo la catena reale (uprot -> maxstream/uprots, clicka -> safego -> adelta ->
- * deltabit) e delega all'estrattore dell'host finale.
+ * Flusso loadLinks (v5, riscritto da capo, SOLO richieste HTTP pure - nessuna WebView):
+ * 1. uprot.net  -> GET variante /mse/ poi /msf/ -> anchor "Continue" verso
+ *    maxstream.video/uprots/<id> (schema ufficiale ShortLink.unshortenUprot di
+ *    CloudStream, usato identico da CB01/Toonitalia) -> estrattore MaxStream.
+ * 2. clicka.cc  -> POST /ajax/linkEmbedView.php con id=<token> -> JSON
+ *    {"data":{"value":"<url host>"}}; fallback /ajax/linkView.php, poi parse pagina.
+ * 3. L'host finale viene passato all'estrattore dedicato (m3u8/mp4) o a loadExtractor.
+ *
+ * Nota su clicka.cc: e' protetto da Cloudflare (ItalianCloudStream lo salta del tutto);
+ * qui si tenta comunque la via AJAX che non carica la pagina HTML, ma il canale
+ * PRIMARIO resta uprot -> MaxStream. Nessuna ramificazione di tentativi: ogni link
+ * segue UNA catena lineare con tetto temporale globale.
  */
 class SisterHappy : MainAPI() {
     override var name = "SisterHappy"
@@ -86,29 +77,42 @@ class SisterHappy : MainAPI() {
         /** Pagina unica della serie gestita da questo plugin. */
         const val SHOW_PATH = "/x-factor-53/"
 
-        /** Host che mascherano i link veri (protettori, livello captcha incluso). */
-        private val PROTECTOR_HOSTS = listOf("uprot.net", "clicka.cc", "safego.cc")
+        /** Host video finali riconosciuti come "foglia" della catena. */
+        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop")
+
+        /** Tempo massimo dell'intera risoluzione di un episodio. */
+        private const val DEADLINE_MS = 45_000L
+
+        /** Timeout di ogni singola richiesta HTTP, in SECONDI (l'unita' di nicehttp). */
+        private const val HTTP_TIMEOUT_S = 8L
 
         /** Prefissi di pagina del sito che NON sono pagine serie: tolti dalla ricerca. */
         private val NON_SHOW_PREFIXES = listOf(
             "category", "elenco-", "guida-", "richieste", "nuovi-ep", "tag", "author", "page"
         )
 
-        /** URL finali riconosciuti come "foglia" (host video o pagina player). */
-        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop")
+        /** URL verso un host video noto, in qualunque parte del codice HTML. */
+        private val KNOWN_HOST_RE = Regex(
+            "https?://[\\w.-]*(?:maxstream|deltabit|mixdrop)[\\w.-]*/[^\\s\"'<>]+",
+            RegexOption.IGNORE_CASE
+        )
 
-        private val UPROTS_RE =
-            Regex("https?://[\\w.-]*maxstream\\.video/uprots/[A-Za-z0-9=]+", RegexOption.IGNORE_CASE)
-        private val ADELTA_RE =
-            Regex("https?://[\\w.-]*clicka\\.cc/adelta/[A-Za-z0-9=]+", RegexOption.IGNORE_CASE)
-        private val ANCHOR_RE = Regex(
-            "<a[^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
-            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        /**
+         * Anchor "Continue" delle pagine uprot: href catturato nel gruppo 1
+         * (schema ufficiale: recloudstream UnshortenUrl.kt, Toonitalia, CB01).
+         * Nessun DOT_MATCHES_ALL: il match resta sulla singola riga.
+         */
+        private val CONTINUE_RE = Regex("""<a[^>]+href="([^"]+)".*?Continue""", RegexOption.IGNORE_CASE)
+
+        private val META_REFRESH_RE = Regex(
+            "http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*content\\s*=\\s*[\"'][^\"']*url=([^\"'>]+)",
+            RegexOption.IGNORE_CASE
+        )
+        private val JS_LOCATION_RE = Regex(
+            "(?:window\\.)?location(?:\\.href|\\.replace\\(\\s*)?\\s*[=(]\\s*[\"']([^\"']+)[\"']",
+            RegexOption.IGNORE_CASE
         )
     }
-
-    /** Bypass Cloudflare riusato per tutte le richieste ai protettori. */
-    private val cfKiller = CloudflareKiller()
 
     private fun navHeaders(referer: String? = null): Map<String, String> {
         val base = mapOf(
@@ -119,45 +123,12 @@ class SisterHappy : MainAPI() {
         return if (referer != null) base + mapOf("Referer" to referer) else base
     }
 
-    /**
-     * Header "full browser" (pattern MammaMia): senza Sec-Fetch-*, DNT, Priority e
-     * Upgrade-Insecure-Requests la Cloudflare dei protettori risponde 403 anche con
-     * fingerprint browser. Sec-Fetch-Site viene allineato al rapporto tra target e referer.
-     */
-    private fun fullHeaders(referer: String? = null, origin: String? = null): Map<String, String> {
-        val headers = mutableMapOf(
-            "User-Agent" to SH_UA,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.5",
-            "Sec-GPC" to "1",
-            "Connection" to "keep-alive",
-            "Upgrade-Insecure-Requests" to "1",
-            "Sec-Fetch-Dest" to "document",
-            "Sec-Fetch-Mode" to "navigate",
-            "Sec-Fetch-Site" to "none",
-            "Sec-Fetch-User" to "?1",
-            "DNT" to "1",
-            "Priority" to "u=0, i",
-        )
-        if (origin != null) headers["Origin"] = origin
-        if (referer != null) {
-            headers["Referer"] = referer
-            val refHost = referer.toHttpUrlOrNull()?.host
-            val targetHost = headers["Origin"]?.toHttpUrlOrNull()?.host
-            headers["Sec-Fetch-Site"] = if (refHost != null && refHost == targetHost) "same-origin" else "cross-site"
-        }
-        return headers
-    }
+    /** GET con header da browser e timeout corretto; mai lancia, al piu' null. */
+    private suspend fun shGet(url: String, referer: String? = null) = runCatching {
+        app.get(url, headers = navHeaders(referer), timeout = HTTP_TIMEOUT_S)
+    }.getOrNull()
 
-    /** GET senza redirect, solo se il budget lo consente e l'URL non e' gia' stato chiesto. */
-    private suspend fun getNoRedirect(url: String, headers: Map<String, String>, budget: ShBudget) =
-        if (!budget.can() || !budget.mark(url)) null
-        else {
-            budget.used++
-            runCatching {
-                app.get(url, allowRedirects = false, headers = headers, timeout = 10_000, interceptor = cfKiller)
-            }.getOrNull()
-        }
+    private fun isLeafHost(url: String): Boolean = LEAF_HOSTS.any { url.contains(it, ignoreCase = true) }
 
     // ------------------------------------------------------------------
     //  HOME: una sola riga con la scheda della serie
@@ -338,7 +309,7 @@ class SisterHappy : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    //  LINK: risoluzione protettori + host video finali
+    //  LINK: risoluzione lineare protettori -> host video (niente WebView)
     // ------------------------------------------------------------------
 
     override suspend fun loadLinks(
@@ -348,272 +319,166 @@ class SisterHappy : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episode = tryParseJson<ShEpisodeData>(data) ?: return false
-        // Tetto rigido per TUTTA la risoluzione (primo + secondo pass condividono
-        // lo stesso budget): senza limite i tentativi di riserva possono catenare
-        // decine di richieste e l'app resta "in caricamento" per minuti.
-        val budget = ShBudget(
-            maxRequests = 20,
-            deadline = System.currentTimeMillis() + 80_000,
-        )
-        // Il challenge Cloudflare a volte viene risolto solo al secondo colpo:
-        // se il primo pass non ha emesso nulla si ritenta con il budget residuo.
-        return tryAllLinks(episode.links, subtitleCallback, callback, budget)
-            || tryAllLinks(episode.links, subtitleCallback, callback, budget)
-    }
+        if (episode.links.isEmpty()) return false
 
-    private suspend fun tryAllLinks(
-        links: List<ShLink>,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        budget: ShBudget,
-    ): Boolean {
-        var found = false
-        for (link in links) {
-            if (link.url.isBlank()) continue
-            val ok = runCatching {
-                resolveAndExtract(link.url, subtitleCallback, callback, budget)
-            }.getOrDefault(false)
-            if (ok) found = true
+        // Il canale affidabile e' uprot -> MaxStream: va per primo.
+        // clicka (DeltaBit/MixDrop) e' dietro Cloudflare: si tenta dopo, via AJAX.
+        val ordered = episode.links.sortedBy { link ->
+            when {
+                link.url.contains("uprot.net", ignoreCase = true) -> 0
+                else -> 1
+            }
         }
-        return found
+        val deadline = System.currentTimeMillis() + DEADLINE_MS
+
+        // I link vengono risolti in parallelo: ogni catena e' lineare e corta
+        // (max 3 richieste), quindi il tempo totale resta sotto il tetto.
+        val results = ordered.amap { link ->
+            if (System.currentTimeMillis() >= deadline || link.url.isBlank()) false
+            else runCatching {
+                resolveAndExtract(link.url, deadline, subtitleCallback, callback)
+            }.getOrDefault(false)
+        }
+        return results.any { it }
     }
 
-    /** Risolve l'eventuale protettore e delega all'estrattore dell'host finale. */
+    /** Risolve l'eventuale protettore con una catena lineare e delega all'estrattore finale. */
     private suspend fun resolveAndExtract(
         url: String,
+        deadline: Long,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        budget: ShBudget,
     ): Boolean {
-        if (!budget.can()) return false
         var emitted = false
         val wrapped: (ExtractorLink) -> Unit = { l ->
             emitted = true
             callback(l)
         }
-        // 1. Risoluzione HTTP veloce (AJAX / redirect / parsing), poi ultima
-        //    spiaggia: WebView invisibile che esegue il JavaScript del protettore
-        //    esattamente come fa il browser (challenge Cloudflare, countdown,
-        //    redirect JS) e si ferma sul primo host video incontrato.
-        val finalUrl = walkProtector(url, 0, budget) ?: webviewResolve(url, budget) ?: return false
-        when {
-            finalUrl.contains("maxstream", ignoreCase = true) ->
-                MaxStreamExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, wrapped)
-            finalUrl.contains("mixdrop", ignoreCase = true) ->
-                MixDropExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, wrapped)
-            finalUrl.contains("deltabit", ignoreCase = true) ->
-                DeltaBitExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, wrapped)
-            else -> {
-                // Host non noto: prova gli estrattori registrati dall'app, poi il link diretto
-                val handled = runCatching {
-                    loadExtractor(finalUrl, mainUrl, subtitleCallback, wrapped)
-                }.getOrDefault(false)
-                if (!handled) emitDirectLink(finalUrl, wrapped)
-            }
-        }
-        // 2. Se l'estrattore HTTP dell'host finale non ha emesso nulla (es. il
-        //    player richiede JS), WebView profonda fino al file video vero e proprio
-        if (!emitted && budget.can()) {
-            val direct = webviewResolve(finalUrl, budget, videoOnly = true)
-            if (direct != null) emitDirectLink(direct, wrapped)
-        }
+
+        val target = when {
+            isLeafHost(url) -> url
+            url.contains("uprot.net", ignoreCase = true) -> resolveUprot(url, deadline)
+            url.contains("clicka.cc", ignoreCase = true) ||
+                url.contains("safego.cc", ignoreCase = true) -> resolveClicka(url, deadline)
+            else -> url // host diretto non noto: si prova comunque loadExtractor
+        } ?: return false
+
+        extractFinal(target, subtitleCallback, wrapped)
         return emitted
     }
 
     /**
-     * "Come il browser": una WebView invisibile naviga il link eseguendo TUTTO il
-     * JavaScript (challenge Cloudflare, countdown, redirect costruiti via JS) e la
-     * navigazione viene fermata alla prima richiesta utile:
-     * - videoOnly=false: prima richiesta verso un host video (pagina player)
-     * - videoOnly=true: primo file video (.m3u8/.mp4/.mkv) richiesto dal player
-     * Se useOkhttp=false la WebView fa tutte le richieste da se', come un browser
-     * vero (richiesto per Cloudflare, vedi documentazione WebViewResolver).
+     * uprot.net: GET della pagina e lettura dell'anchor "Continue" verso l'host video.
+     * Prima la variante /mse/ (senza captcha, trucco noto), poi l'originale /msf/.
+     * Se il Continue rimanda a un'altra pagina uprot si segue per al massimo 2 salti.
      */
-    private suspend fun webviewResolve(url: String, budget: ShBudget, videoOnly: Boolean = false): String? {
-        if (!budget.can()) return null
-        val intercept = if (videoOnly) {
-            Regex("\\.m3u8|\\.mp4|\\.mkv", RegexOption.IGNORE_CASE)
-        } else {
-            Regex("maxstream|deltabit|mixdrop|\\.m3u8|\\.mp4", RegexOption.IGNORE_CASE)
-        }
-        val resolver = WebViewResolver(
-            interceptUrl = intercept,
-            useOkhttp = false,
-            timeout = 25_000L,
-        )
-        return runCatching {
-            val (finalReq, _) = resolver.resolveUsingWebView(url, referer = mainUrl, requestCallBack = { true })
-            finalReq?.url?.toString()
-        }.getOrNull()
-    }
+    private suspend fun resolveUprot(url: String, deadline: Long): String? {
+        var current = url
+        for (hop in 0 until 3) {
+            if (System.currentTimeMillis() >= deadline) return null
+            val candidates = if (current.contains("/msf/", ignoreCase = true))
+                listOf(current.replace("/msf/", "/mse/", ignoreCase = true), current)
+            else listOf(current)
 
-    /**
-     * Cammina la catena dei protettori fino all'URL "foglia" (host video o pagina player).
-     * uprot.net -> maxstream.video/uprots/... (o clicka/adelta), clicka.cc -> deltabit,
-     * con livello captcha safego.cc quando presente.
-     */
-    private suspend fun walkProtector(url: String, hops: Int, budget: ShBudget): String? {
-        if (hops > 6) return null
-        return when {
-            LEAF_HOSTS.any { url.contains(it, true) } -> url
-            url.contains("uprot.net", true) -> walkUprot(url, hops, budget)
-            url.contains("clicka.cc", true) || url.contains("safego.cc", true) -> walkClicka(url, hops, budget)
-            else -> url // host diretto non noto: il chiamante prova gli estrattori dell'app
-        }
-    }
-
-    /**
-     * uprot.net: trucco MammaMia "msf -> mse" (la variante /mse/ NON mostra il captcha),
-     * ritentando anche l'URL originale /msf/ se la variante non risponde; poi 30x o
-     * pagina con anchor CONTINUE verso maxstream/uprots o clicka/adelta.
-     */
-    private suspend fun walkUprot(url: String, hops: Int, budget: ShBudget): String? {
-        val probe = if (url.contains("/msf/")) url.replace("/msf/", "/mse/") else url
-        for (candidate in listOf(probe, url).distinct()) {
-            attemptUprot(candidate, hops, budget)?.let { return it }
+            var next: String? = null
+            for (candidate in candidates) {
+                val resp = shGet(candidate, referer = mainUrl + SHOW_PATH) ?: continue
+                next = parseUprotPage(resp.text) ?: continue
+                break
+            }
+            if (next == null) return null
+            if (!next.contains("uprot.net", ignoreCase = true)) return next
+            current = next
         }
         return null
     }
 
-    private suspend fun attemptUprot(probe: String, hops: Int, budget: ShBudget): String? {
-        val headers = fullHeaders(referer = "https://uprot.net/")
-        val resp = getNoRedirect(probe, headers, budget) ?: return null
-
-        val location = resp.headers["location"]
-        if (!location.isNullOrBlank()) {
-            return walkProtector(absolutize(probe, location), hops + 1, budget)
-        }
-
-        val html = resp.text
-        if (isCaptchaPage(html)) return null
-        followContinue(html, probe, hops, budget)?.let { return it }
-        // Fallback: primo URL uprots/adelta grezzo nel body
-        UPROTS_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
-        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
-        extractDestination(html)?.let { return walkProtector(absolutize(probe, it), hops + 1, budget) }
-        // Ultima riserva SOLO vicino alla radice: primi anchor generici della
-        // pagina (con hops bassi la ramificazione resta limitata dal budget)
-        if (hops <= 1) {
-            val anchors = ANCHOR_RE.findAll(html)
-                .map { it.groupValues[1] }
-                .filter { it.startsWith("http") && it != probe }
-                .take(2)
-                .toList()
-            for (href in anchors) {
-                walkProtector(href, hops + 1, budget)?.let { return it }
+    /** Parsing della pagina uprot: anchor Continue, poi URL host noto, poi redirect JS/meta. */
+    private fun parseUprotPage(html: String): String? {
+        CONTINUE_RE.findAll(html).forEach { m ->
+            val href = m.groupValues[1].trim()
+            if (href.startsWith("http") && (isLeafHost(href) || href.contains("uprot.net", true))) {
+                return href
             }
         }
-        return null
+        KNOWN_HOST_RE.find(html)?.value?.let { return it }
+        return htmlRedirect(html)
     }
 
     /**
-     * Via AJAX del protettore clicka.cc (stessa piattaforma di stayonline, viste
-     * in produzione nel plugin italiano MultiSite): POST /ajax/linkEmbedView.php
-     * con id=<token> risponde JSON {"data":{"value":"<url>"}} con il link FINALE,
-     * saltando pagina HTML e challenge. Fallback sull'endpoint /ajax/linkView.php.
+     * clicka.cc: stessa piattaforma di stayonline. La pagina HTML e' dietro
+     * Cloudflare, ma gli endpoint AJAX rispondono in JSON: POST con id=<token>
+     * (ultimo segmento del path) e ritorna {"data":{"value":"<url finale>"}}.
+     * Fallback: endpoint linkView.php, poi GET della pagina con parse.
      */
-    private suspend fun clickaAjax(url: String, budget: ShBudget): String? {
+    private suspend fun resolveClicka(url: String, deadline: Long): String? {
         val id = url.trimEnd('/').substringAfterLast('/')
         if (id.isBlank()) return null
-        val body = "id=$id&ref=".toRequestBody(
-            "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
-        )
+
         for (endpoint in listOf("linkEmbedView.php", "linkView.php")) {
-            if (!budget.can() || !budget.mark("https://clicka.cc/ajax/$endpoint?id=$id")) continue
-            budget.used++
+            if (System.currentTimeMillis() >= deadline) return null
+            val body = "id=$id&ref=".toRequestBody(
+                "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
+            )
             val resp = runCatching {
                 app.post(
                     "https://clicka.cc/ajax/$endpoint",
-                    headers = fullHeaders(referer = url, origin = "https://clicka.cc")
-                        .plus(
-                            mapOf(
-                                "Accept" to "application/json, text/javascript, */*; q=0.01",
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "Sec-Fetch-Dest" to "empty",
-                                "Sec-Fetch-Mode" to "cors",
-                            )
-                        ),
+                    headers = mapOf(
+                        "User-Agent" to SH_UA,
+                        "Accept" to "application/json, text/javascript, */*; q=0.01",
+                        "Accept-Language" to "it-IT,it;q=0.9,en;q=0.8",
+                        "Origin" to "https://clicka.cc",
+                        "Referer" to url,
+                        "X-Requested-With" to "XMLHttpRequest",
+                    ),
                     requestBody = body,
-                    timeout = 10_000,
-                    interceptor = cfKiller,
+                    timeout = HTTP_TIMEOUT_S,
                 )
             }.getOrNull() ?: continue
+            if (resp.code != 200) continue
+            // Se Cloudflare intercetta la POST la risposta e' HTML, non JSON:
+            // JSONObject lancia e si passa all'endpoint successivo.
             val value = runCatching {
                 JSONObject(resp.text).optJSONObject("data")?.optString("value") ?: ""
             }.getOrDefault("")
             if (value.startsWith("http")) return value
         }
+
+        // Ultima spiaggia: GET della pagina (redirect seguiti) e parse del corpo.
+        if (System.currentTimeMillis() >= deadline) return null
+        val page = shGet(url, referer = mainUrl + SHOW_PATH) ?: return null
+        KNOWN_HOST_RE.find(page.text)?.value?.let { return it }
+        return htmlRedirect(page.text)
+    }
+
+    /** Redirect dentro l'HTML: meta refresh o location.href/location.replace. */
+    private fun htmlRedirect(html: String): String? {
+        META_REFRESH_RE.find(html)?.groupValues?.get(1)?.trim()?.let { if (it.startsWith("http")) return it }
+        JS_LOCATION_RE.find(html)?.groupValues?.get(1)?.trim()?.let { if (it.startsWith("http")) return it }
         return null
     }
 
-    /** clicka.cc (e safego.cc): via AJAX, poi 30x verso safego/adelta/deltabit, poi pagina HTML. */
-    private suspend fun walkClicka(url: String, hops: Int, budget: ShBudget): String? {
-        // 1. AJAX: la risposta e' il link finale (deltabit/mixdrop/maxstream)
-        clickaAjax(url, budget)?.let { return walkProtector(it, hops + 1, budget) }
-
-        // 2. GET senza redirect: 30x con Location verso la catena
-        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://clicka.cc"), budget)
-            ?: return null
-        val location = resp.headers["location"]
-        if (!location.isNullOrBlank()) {
-            val next = absolutize(url, location)
-            if (next.contains("safego", ignoreCase = true)) {
-                return walkSafego(next, hops, budget)
-            }
-            return walkProtector(next, hops + 1, budget)
-        }
-
-        val html = resp.text
-        if (isCaptchaPage(html)) return null
-        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
-        followContinue(html, url, hops, budget)?.let { return it }
-        extractDestination(html)?.let { return walkProtector(absolutize(url, it), hops + 1, budget) }
-        return null
-    }
-
-    /** Livello captcha safego.cc: se l'IP e gia noto, reindirizza o contiene il link adelta. */
-    private suspend fun walkSafego(url: String, hops: Int, budget: ShBudget): String? {
-        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://safego.cc"), budget)
-            ?: return null
-        val location = resp.headers["location"]
-        if (!location.isNullOrBlank()) {
-            return walkProtector(absolutize(url, location), hops + 1, budget)
-        }
-        val html = resp.text
-        if (isCaptchaPage(html)) return null
-        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
-        followContinue(html, url, hops, budget)?.let { return it }
-        return null
-    }
-
-    /**
-     * Anchor con testo CONTINUE: quello reale punta a maxstream/clicka/uprots/adelta
-     * (le pagine possono contenere URL esca nascosti, quindi hanno priorita' i filtrati).
-     */
-    private suspend fun followContinue(html: String, baseUrl: String, hops: Int, budget: ShBudget): String? {
-        val filtered = mutableListOf<String>()
-        val generic = mutableListOf<String>()
-        ANCHOR_RE.findAll(html).forEach { m ->
-            val href = m.groupValues[1]
-            val text = m.groupValues[2].replace(Regex("\\s+"), "").uppercase()
-            if (text.contains("CONTINUE")) {
-                if (listOf("maxstream", "clicka", "uprots", "adelta", "safego")
-                        .any { href.contains(it, true) }
-                ) filtered.add(href) else generic.add(href)
+    /** Manda l'URL finale all'estrattore dell'host giusto (o a quelli dell'app). */
+    private suspend fun extractFinal(
+        url: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ) {
+        when {
+            url.contains("maxstream", ignoreCase = true) ->
+                MaxStreamExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
+            url.contains("mixdrop", ignoreCase = true) ->
+                MixDropExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
+            url.contains("deltabit", ignoreCase = true) ->
+                DeltaBitExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
+            else -> {
+                // Host non noto: prova gli estrattori registrati dall'app, poi il file diretto
+                val handled = runCatching {
+                    loadExtractor(url, mainUrl, subtitleCallback, callback)
+                }.getOrDefault(false)
+                if (!handled) emitDirectLink(url, callback)
             }
         }
-        for (href in filtered + generic) {
-            val dest = walkProtector(absolutize(baseUrl, href), hops + 1, budget)
-            if (dest != null) return dest
-        }
-        return null
-    }
-
-    /** Pagina captcha (immagine base64 senza nessun link utile): inutile insistere. */
-    private fun isCaptchaPage(body: String): Boolean {
-        val hasImage = body.contains("data:image", ignoreCase = true)
-        val hasTarget = UPROTS_RE.containsMatchIn(body) || ADELTA_RE.containsMatchIn(body)
-        return hasImage && !hasTarget
     }
 
     /** Se la catena finisce dritto su un file video, lo emette senza estrattore. */
@@ -639,33 +504,5 @@ class SisterHappy : MainAPI() {
                 this.quality = com.lagradost.cloudstream3.utils.Qualities.Unknown.value
             }
         )
-    }
-
-    /** Cerca nel codice HTML una destinazione (meta refresh / JS / anchor verso host noto). */
-    private fun extractDestination(html: String): String? {
-        Regex(
-            "http-equiv\\s*=\\s*[\"']refresh[\"'][^>]*content\\s*=\\s*[\"'][^\"']*url=([^\"'>]+)",
-            RegexOption.IGNORE_CASE
-        ).find(html)?.groupValues?.get(1)?.trim()?.let { return it }
-        Regex(
-            "content\\s*=\\s*[\"'][^\"']*url=([^\"'>]+)[\"'][^>]*http-equiv\\s*=\\s*[\"']refresh[\"']",
-            RegexOption.IGNORE_CASE
-        ).find(html)?.groupValues?.get(1)?.trim()?.let { return it }
-        Regex(
-            "(?:window\\.)?location(?:\\.href|\\.replace\\(\\s*)?\\s*[=(]\\s*[\"']([^\"']+)[\"']",
-            RegexOption.IGNORE_CASE
-        ).find(html)?.groupValues?.get(1)?.trim()?.let { if (it.startsWith("http")) return it }
-        Regex(
-            "https?://[\\w.-]*(?:maxstream|mixdrop|deltabit|streamtape|voe)[\\w.-]*/[^\"'<>\\s]*",
-            RegexOption.IGNORE_CASE
-        ).find(html)?.value?.let { return it }
-        return null
-    }
-
-    /** Risolve href relativi rispetto alla pagina corrente. */
-    private fun absolutize(base: String, href: String): String {
-        if (href.startsWith("http://") || href.startsWith("https://")) return href
-        val baseHttpUrl = base.toHttpUrlOrNull() ?: return href
-        return baseHttpUrl.resolve(href)?.toString() ?: href
     }
 }

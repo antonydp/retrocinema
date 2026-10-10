@@ -11,23 +11,15 @@ import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
 /**
- * Header "full browser" condivisi (pattern MammaMia): la Cloudflare di uprot.net /
- * maxstream.video / clicka.cc risponde 403 senza Sec-Fetch-*, DNT, Priority e
- * Upgrade-Insecure-Requests.
+ * Header condivisi, MINIMI come nelle implementazioni collaudate (estrattore
+ * Maxstream ufficiale di CloudStream, CB01 di doGior, Toonitalia): solo
+ * User-Agent, Accept, Accept-Language e Referer. Header Sec-Fetch-* in piu'
+ * non aiutano e a volte buckiano i WAF.
  */
 fun shFullHeaders(referer: String): Map<String, String> = mapOf(
     "User-Agent" to SH_UA,
     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language" to "en-US,en;q=0.5",
-    "Sec-GPC" to "1",
-    "Connection" to "keep-alive",
-    "Upgrade-Insecure-Requests" to "1",
-    "Sec-Fetch-Dest" to "document",
-    "Sec-Fetch-Mode" to "navigate",
-    "Sec-Fetch-Site" to "cross-site",
-    "Sec-Fetch-User" to "?1",
-    "DNT" to "1",
-    "Priority" to "u=0, i",
+    "Accept-Language" to "it-IT,it;q=0.9,en;q=0.8",
     "Referer" to referer,
 )
 
@@ -72,7 +64,7 @@ class MaxStreamExtractor : ExtractorApi() {
     private suspend fun extractFromUprots(url: String, callback: (ExtractorLink) -> Unit) {
         val headers = shFullHeaders(referer = "https://uprot.net/")
         val response = runCatching {
-            app.get(url, headers = headers, timeout = 20_000)
+            app.get(url, headers = headers, timeout = 15)
         }.getOrNull() ?: return
         if (response.code != 200) {
             Log.d(name, "uprots GET status ${response.code}")
@@ -93,7 +85,7 @@ class MaxStreamExtractor : ExtractorApi() {
             if (parts.size >= 2 && parts[1].isNotBlank()) {
                 val playerUrl = "https://maxstream.video/emvvv/${parts[1]}"
                 val playerResp = runCatching {
-                    app.get(playerUrl, headers = shFullHeaders(referer = finalUrl), timeout = 20_000)
+                    app.get(playerUrl, headers = shFullHeaders(referer = finalUrl), timeout = 12)
                 }.getOrNull()
                 if (playerResp != null && playerResp.code == 200) {
                     shFindM3u8(playerResp.text)?.let { emit(it, callback); return }
@@ -107,7 +99,7 @@ class MaxStreamExtractor : ExtractorApi() {
             RegexOption.IGNORE_CASE
         ).find(body)?.groupValues?.get(1)?.let { iframe ->
             val iframeResp = runCatching {
-                app.get(iframe, headers = shFullHeaders(referer = finalUrl), timeout = 20_000)
+                app.get(iframe, headers = shFullHeaders(referer = finalUrl), timeout = 12)
             }.getOrNull()
             if (iframeResp != null && iframeResp.code == 200) {
                 shFindM3u8(iframeResp.text)?.let { emit(it, callback); return }
@@ -126,7 +118,7 @@ class MaxStreamExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
     ) {
         val response = runCatching {
-            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 15_000)
+            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 12)
         }.getOrNull() ?: return
         val body = response.body.string()
 
@@ -190,7 +182,7 @@ class DeltaBitExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
     ) {
         val response = runCatching {
-            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 15_000)
+            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 12)
         }.getOrNull() ?: return
         val body = response.body.string()
 
@@ -259,7 +251,7 @@ class MixDropExtractor : ExtractorApi() {
             app.get(
                 playerUrl,
                 headers = shFullHeaders(referer = referer ?: mainUrl),
-                timeout = 15_000,
+                timeout = 12,
             )
         }.getOrNull() ?: return
         val body = response.body.string()

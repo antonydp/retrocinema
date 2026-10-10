@@ -109,7 +109,7 @@ Un'estensione dedicata a una sola serie TV, per chi vuole solo quella: niente ca
 Come funziona:
 - gli episodi sono letti direttamente dalla pagina ufficiale del sito, quindi **appaiono da soli quando escono puntate nuove**;
 - ogni episodio offre **più host** quando disponibili (MaxStream, DeltaBit, MixDrop): se uno non va, ne provi un altro dal menu sorgenti del player;
-- i link sono protetti da servizi "accorcia-link": il plugin li **apre in automatico** (redirect, form e iniziale Cloudflare compresi) e in caso di errore **riprova**;
+- i link sono protetti da servizi "accorcia-link": il plugin li **apre in automatico** (redirect e pagine intermedie comprese) con una catena di richieste leggera e con **limite di tempo**, così il player risponde sempre in pochi secondi;
 - la **ricerca** dentro il plugin cerca nel sito (pagine serie) e torna utile se la pagina della serie cambia indirizzo: basterà aprire il nuovo risultato.
 
 ## 🆘 Problemi comuni
