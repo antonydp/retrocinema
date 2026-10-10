@@ -54,18 +54,21 @@ data class ShEpisodeData(
  *     "15x01 Audizioni 1 - <a href=protettore>MaxStream</a> - <a>DeltaBit</a>"
  * - i link passano da protettori (uprot.net, clicka.cc) che nascondono gli host video
  *
- * Flusso loadLinks (v5, riscritto da capo, SOLO richieste HTTP pure - nessuna WebView):
- * 1. uprot.net  -> GET variante /mse/ poi /msf/ -> anchor "Continue" verso
- *    maxstream.video/uprots/<id> (schema ufficiale ShortLink.unshortenUprot di
- *    CloudStream, usato identico da CB01/Toonitalia) -> estrattore MaxStream.
- * 2. clicka.cc  -> POST /ajax/linkEmbedView.php con id=<token> -> JSON
- *    {"data":{"value":"<url host>"}}; fallback /ajax/linkView.php, poi parse pagina.
- * 3. L'host finale viene passato all'estrattore dedicato (m3u8/mp4) o a loadExtractor.
- *
- * Nota su clicka.cc: e' protetto da Cloudflare (ItalianCloudStream lo salta del tutto);
- * qui si tenta comunque la via AJAX che non carica la pagina HTML, ma il canale
- * PRIMARIO resta uprot -> MaxStream. Nessuna ramificazione di tentativi: ogni link
- * segue UNA catena lineare con tetto temporale globale.
+ * Punti chiave della v8 (diagnostica sul campo):
+ * - RICERCA MONO-SERIE: il plugin risponde solo con la sua serie, mai risultati
+ *   estranei del sito (il tester interno dell'app prova il PRIMO risultato di
+ *   ricerca e il PRIMO episodio: con risultati estranei testava pagine sbagliate).
+ * - EPISODI IN ORDINE NUOVA-STAGIONE-PRIMA: il primo episodio caricato e' quello
+ *   della stagione corrente, che ha i link uprot -> MaxStream (il canale
+ *   affidabile); le righe vecchie con soli link clicka finiscono in fondo.
+ * - COOKIE A MANO: il client HTTP dell'app NON ha un cookie jar (verificato nel
+ *   sorgente CloudStream/nicehttp): i cookie ricevuti da ogni pagina vengono
+ *   raccolti e rinviati esplicitamente alle richieste successive, come fa il
+ *   browser. Senza questo la POST AJAX dei protettori parte "a mani vuote".
+ * - REDIRECT A MANO nell'estrattore MaxStream: ogni salto raccoglie i cookie.
+ * - ESTRAZIONE GENERICA: se la catena arriva su una pagina sconosciuta, il
+ *   plugin la scarica e ricava l'm3u8/mp4 da solo (regex in cascata).
+ * - Niente WebView: solo richieste HTTP pure con tetto temporale globale.
  */
 class SisterHappy : MainAPI() {
     override var name = "SisterHappy"
@@ -87,14 +90,15 @@ class SisterHappy : MainAPI() {
         /** Timeout di ogni singola richiesta HTTP, in SECONDI (l'unita' di nicehttp). */
         private const val HTTP_TIMEOUT_S = 8L
 
-        /** Prefissi di pagina del sito che NON sono pagine serie: tolti dalla ricerca. */
-        private val NON_SHOW_PREFIXES = listOf(
-            "category", "elenco-", "guida-", "richieste", "nuovi-ep", "tag", "author", "page"
-        )
-
         /** URL verso un host video noto, in qualunque parte del codice HTML. */
         private val KNOWN_HOST_RE = Regex(
             "https?://[\\w.-]*(?:maxstream|deltabit|mixdrop|mxdrop)[\\w.-]*/[^\\s\"'<>]+",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** File video diretto (m3u8/mp4/mkv) in qualunque parte del codice HTML. */
+        private val MEDIA_RE = Regex(
+            "https?://[^\\s\"'<>]+\\.(?:m3u8|mp4|mkv)[^\\s\"'<>]*",
             RegexOption.IGNORE_CASE
         )
 
@@ -126,9 +130,11 @@ class SisterHappy : MainAPI() {
         return if (referer != null) base + mapOf("Referer" to referer) else base
     }
 
-    /** GET con header da browser e timeout corretto; mai lancia, al piu' null. */
-    private suspend fun shGet(url: String, referer: String? = null) = runCatching {
-        app.get(url, headers = navHeaders(referer), timeout = HTTP_TIMEOUT_S)
+    /** GET con header da browser, cookie opzionale e timeout corretto; mai lancia, al piu' null. */
+    private suspend fun shGet(url: String, referer: String? = null, cookie: String? = null) = runCatching {
+        val headers = if (cookie != null) navHeaders(referer) + mapOf("Cookie" to cookie)
+        else navHeaders(referer)
+        app.get(url, headers = headers, timeout = HTTP_TIMEOUT_S)
     }.getOrNull()
 
     private fun isLeafHost(url: String): Boolean = LEAF_HOSTS.any { url.contains(it, ignoreCase = true) }
@@ -145,29 +151,19 @@ class SisterHappy : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    //  RICERCA: motore di ricerca WordPress del sito (pagine serie)
+    //  RICERCA: solo la serie gestita dal plugin
     // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val response = app.get(
-            "$mainUrl/",
-            params = mapOf("s" to query),
-            headers = navHeaders(referer = mainUrl),
-        )
-        val doc = response.document
-        val results = mutableListOf<SearchResponse>()
-        doc.select("h2 a[href], h3 a[href]").forEach { a ->
-            val href = a.attr("abs:href")
-            if (href.isBlank() || !href.startsWith(mainUrl)) return@forEach
-            val slug = href.removePrefix(mainUrl).trimStart('/').trimEnd('/').substringBefore('/')
-            if (slug.isEmpty() || NON_SHOW_PREFIXES.any { slug.startsWith(it) }) return@forEach
-            val title = a.text().trim()
-            if (title.isEmpty()) return@forEach
-            results.add(
-                newTvSeriesSearchResponse(title, href, TvType.TvSeries) { }
-            )
-        }
-        return results.distinctBy { it.url }
+        // Plugin mono-serie: risponde SOLO con la sua pagina, e solo se la
+        // query e' coerente col titolo (lettere, spazi ignorati, cifre escluse:
+        // "x factor 20" conta come "xfactor"). Mai risultati estranei del sito:
+        // il tester dell'app prova il primo risultato trovato.
+        val q = query.lowercase().filter { it.isLetter() }.replace(" ", "")
+        val slug = SHOW_PATH.filter { it.isLetter() }
+        if (q.isEmpty() || !slug.contains(q)) return emptyList()
+        return runCatching { listOf(loadShowCard(mainUrl + SHOW_PATH)) }
+            .getOrDefault(emptyList())
     }
 
     // ------------------------------------------------------------------
@@ -195,7 +191,11 @@ class SisterHappy : MainAPI() {
         // senza l'accordion degli episodi (parte nascosta della sinossi compresa)
         val plot = extractPlot(content)
 
+        // Stagione piu' recente per prima: e' quella che si guarda adesso e
+        // contiene i link uprot -> MaxStream (canale affidabile). Il tester
+        // dell'app prova il primo episodio caricato: cosi' prova il migliore.
         val episodes = parseEpisodes(content)
+            .sortedWith(compareByDescending<Episode> { it.season ?: 0 }.thenBy { it.episode ?: 0 })
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
@@ -204,7 +204,7 @@ class SisterHappy : MainAPI() {
         }
     }
 
-    /** Scheda leggera per la home: solo titolo e poster. */
+    /** Scheda leggera per la home e la ricerca: solo titolo e poster. */
     private suspend fun loadShowCard(url: String): SearchResponse {
         val doc = app.get(url, headers = navHeaders()).document
         val title = doc.selectFirst("h1.entry-title")?.text()?.trim()
@@ -334,8 +334,8 @@ class SisterHappy : MainAPI() {
         }
         val deadline = System.currentTimeMillis() + DEADLINE_MS
 
-        // I link vengono risolti in parallelo: ogni catena e' lineare e corta
-        // (max 3 richieste), quindi il tempo totale resta sotto il tetto.
+        // I link vengono risolti in parallelo: ogni catena e' lineare e corta,
+        // quindi il tempo totale resta sotto il tetto.
         val results = ordered.amap { link ->
             if (System.currentTimeMillis() >= deadline || link.url.isBlank()) false
             else runCatching {
@@ -365,18 +365,20 @@ class SisterHappy : MainAPI() {
             url.contains("uprot.net", ignoreCase = true) -> resolveUprot(url, deadline)
             url.contains("clicka.cc", ignoreCase = true) ||
                 url.contains("safego.cc", ignoreCase = true) -> resolveClicka(url, deadline)
-            else -> url // host diretto non noto: si prova comunque loadExtractor
+            else -> url // host diretto non noto: si prova comunque l'estrazione
         } ?: return false
 
         Log.i(TAG, "host finale raggiunto: $target")
-        extractFinal(target, subtitleCallback, wrapped)
+        extractFinal(target, deadline, subtitleCallback, wrapped)
         return emitted
     }
 
     /**
      * uprot.net: GET della pagina e lettura dell'anchor "Continue" verso l'host video.
      * Prima la variante /mse/ (senza captcha, trucco noto), poi l'originale /msf/.
-     * Se il Continue rimanda a un'altra pagina uprot si segue per al massimo 2 salti.
+     * I cookie ricevuti dalla pagina vengono rinviati alle richieste seguenti
+     * (il client dell'app non ha cookie jar). Se il Continue rimanda a un'altra
+     * pagina uprot si segue per al massimo 2 salti.
      */
     private suspend fun resolveUprot(url: String, deadline: Long): String? {
         var current = url
@@ -387,8 +389,9 @@ class SisterHappy : MainAPI() {
             else listOf(current)
 
             var next: String? = null
+            var jar: Map<String, String> = emptyMap()
             for (candidate in candidates) {
-                val resp = shGet(candidate, referer = mainUrl + SHOW_PATH)
+                val resp = shGet(candidate, referer = mainUrl + SHOW_PATH, cookie = shCookieHeader(jar))
                 if (resp == null) {
                     Log.i(TAG, "uprot: richiesta fallita (DNS/rete/timeout) $candidate")
                     continue
@@ -398,6 +401,7 @@ class SisterHappy : MainAPI() {
                     Log.i(TAG, "uprot: blocco 403 (WAF/bot) su $candidate")
                     continue
                 }
+                jar = jar + resp.cookies
                 next = parseUprotPage(resp.text, resp.document)
                 if (next == null) {
                     Log.i(TAG, "uprot: nessun Continue/host trovato nella pagina $candidate")
@@ -406,6 +410,8 @@ class SisterHappy : MainAPI() {
                 break
             }
             if (next == null) return null
+            // Si accetta qualunque destinazione http (anche dominio nuovo):
+            // l'estrazione finale generica la sa gestire. Se e' ancora uprot si continua.
             if (!next.contains("uprot.net", ignoreCase = true)) return next
             current = next
         }
@@ -415,8 +421,8 @@ class SisterHappy : MainAPI() {
     /**
      * Parsing della pagina uprot. Prima via jsoup: anchor con testo "Continue"
      * (anche con lettere spaziate "C O N T I N U E", come su MammaMia) — vale
-     * l'ULTIMO anchor Continue, come fa MammaMia. Poi URL host noto nel sorgente
-     * grezzo, poi anchor generici verso host noti, poi redirect JS/meta.
+     * l'ULTIMO anchor Continue, come fa MammaMia. Poi file video diretto nel
+     * sorgente, regex grezza, URL host noto, anchor generici, redirect JS/meta.
      */
     private fun parseUprotPage(html: String, doc: Element): String? {
         var continueHref: String? = null
@@ -425,16 +431,20 @@ class SisterHappy : MainAPI() {
             if (text.contains("CONTINUE")) continueHref = a.attr("abs:href")
         }
         continueHref?.let { href ->
-            if (href.startsWith("http") && (isLeafHost(href) || href.contains("uprot.net", true))) {
+            if (href.startsWith("http")) {
                 Log.i(TAG, "uprot: anchor Continue -> $href")
                 return href
             }
-            Log.i(TAG, "uprot: anchor Continue scartato -> $href")
+        }
+        // Ricava il video da solo: m3u8/mp4 gia' presenti nel sorgente pagina
+        MEDIA_RE.find(html)?.value?.let {
+            Log.i(TAG, "uprot: file video diretto nel sorgente")
+            return it
         }
         // Riserva: regex grezza sulla stessa riga (page con markup semplice)
         CONTINUE_RE.findAll(html).forEach { m ->
             val href = m.groupValues[1].trim()
-            if (href.startsWith("http") && isLeafHost(href)) return href
+            if (href.startsWith("http")) return href
         }
         KNOWN_HOST_RE.find(html)?.value?.let {
             Log.i(TAG, "uprot: URL host noto nel sorgente -> $it")
@@ -451,31 +461,49 @@ class SisterHappy : MainAPI() {
     }
 
     /**
-     * clicka.cc: stessa piattaforma di stayonline. La pagina HTML e' dietro
-     * Cloudflare, ma gli endpoint AJAX rispondono in JSON: POST con id=<token>
-     * (ultimo segmento del path) e ritorna {"data":{"value":"<url finale>"}}.
-     * Fallback: endpoint linkView.php, poi GET della pagina con parse.
+     * clicka.cc: la pagina HTML e' spesso dietro Cloudflare, ma il flusso
+     * browser e' replicabile: 1) GET della pagina per raccogliere i cookie
+     * (il client dell'app non ha cookie jar, vanno rinviati a mano);
+     * 2) POST /ajax/linkEmbedView.php con id=<token> (ultimo segmento del
+     * path) e i cookie della pagina -> JSON {"data":{"value":"<url>"}};
+     * 3) fallback /ajax/linkView.php. Se "value" non e' un URL si cerca
+     * dentro redirect o file video.
      */
     private suspend fun resolveClicka(url: String, deadline: Long): String? {
         val id = url.trimEnd('/').substringAfterLast('/')
         if (id.isBlank()) return null
 
+        // 1) GET della pagina: raccoglie i cookie e a volte contiene gia' la destinazione
+        var jar: Map<String, String> = emptyMap()
+        val page = shGet(url, referer = mainUrl + SHOW_PATH)
+        if (page == null) {
+            Log.i(TAG, "clicka: GET pagina fallito (DNS/rete/timeout) $url")
+        } else {
+            Log.i(TAG, "clicka: GET pagina HTTP ${page.code}")
+            jar = page.cookies
+            if (page.code == 200) {
+                KNOWN_HOST_RE.find(page.text)?.value?.let { return it }
+                MEDIA_RE.find(page.text)?.value?.let { return it }
+                htmlRedirect(page.text)?.let { return it }
+            }
+        }
+
+        // 2) AJAX con i cookie della pagina, come fa il browser
         for (endpoint in listOf("linkEmbedView.php", "linkView.php")) {
             if (System.currentTimeMillis() >= deadline) return null
             val body = "id=$id&ref=".toRequestBody(
                 "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
             )
+            val headers = navHeaders(null) + mapOf(
+                "Accept" to "application/json, text/javascript, */*; q=0.01",
+                "Origin" to "https://clicka.cc",
+                "Referer" to url,
+                "X-Requested-With" to "XMLHttpRequest",
+            ) + (shCookieHeader(jar)?.let { mapOf("Cookie" to it) } ?: emptyMap())
             val resp = runCatching {
                 app.post(
                     "https://clicka.cc/ajax/$endpoint",
-                    headers = mapOf(
-                        "User-Agent" to SH_UA,
-                        "Accept" to "application/json, text/javascript, */*; q=0.01",
-                        "Accept-Language" to "it-IT,it;q=0.9,en;q=0.8",
-                        "Origin" to "https://clicka.cc",
-                        "Referer" to url,
-                        "X-Requested-With" to "XMLHttpRequest",
-                    ),
+                    headers = headers,
                     requestBody = body,
                     timeout = HTTP_TIMEOUT_S,
                 )
@@ -484,7 +512,7 @@ class SisterHappy : MainAPI() {
                 Log.i(TAG, "clicka AJAX: richiesta fallita $endpoint")
                 continue
             }
-            Log.i(TAG, "clicka AJAX: HTTP ${resp.code} da $endpoint")
+            Log.i(TAG, "clicka AJAX: HTTP ${resp.code} da $endpoint (cookie: ${jar.size})")
             if (resp.code != 200) continue
             // Se Cloudflare intercetta la POST la risposta e' HTML, non JSON:
             // JSONObject lancia e si passa all'endpoint successivo.
@@ -492,18 +520,12 @@ class SisterHappy : MainAPI() {
                 JSONObject(resp.text).optJSONObject("data")?.optString("value") ?: ""
             }.getOrDefault("")
             if (value.startsWith("http")) return value
+            if (value.isNotBlank()) {
+                htmlRedirect(value)?.let { return it }
+                MEDIA_RE.find(value)?.value?.let { return it }
+            }
         }
-
-        // Ultima spiaggia: GET della pagina (redirect seguiti) e parse del corpo.
-        if (System.currentTimeMillis() >= deadline) return null
-        val page = shGet(url, referer = mainUrl + SHOW_PATH)
-        if (page == null) {
-            Log.i(TAG, "clicka: GET pagina fallito $url")
-            return null
-        }
-        Log.i(TAG, "clicka: GET pagina HTTP ${page.code}")
-        KNOWN_HOST_RE.find(page.text)?.value?.let { return it }
-        return htmlRedirect(page.text)
+        return null
     }
 
     /** Redirect dentro l'HTML: meta refresh o location.href/location.replace. */
@@ -513,41 +535,66 @@ class SisterHappy : MainAPI() {
         return null
     }
 
-    /** Manda l'URL finale all'estrattore dell'host giusto (o a quelli dell'app). */
+    /** Manda l'URL finale all'estrattore dell'host giusto (o all'estrazione generica). */
     private suspend fun extractFinal(
         url: String,
+        deadline: Long,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
+        // File video diretto: emesso subito, senza estrattore
+        if (emitDirectLink(url, callback)) return
         when {
             url.contains("maxstream", ignoreCase = true) ->
-                MaxStreamExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
+                MaxStreamExtractor(deadline).getUrl(url, mainUrl, subtitleCallback, callback)
             url.contains("mixdrop", ignoreCase = true) ||
                 url.contains("mxdrop", ignoreCase = true) ->
                 MixDropExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
             url.contains("deltabit", ignoreCase = true) ->
                 DeltaBitExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
             else -> {
-                // Host non noto: prova gli estrattori registrati dall'app, poi il file diretto
+                // Host non noto: prova gli estrattori registrati dall'app, poi l'estrazione generica
                 val handled = runCatching {
                     loadExtractor(url, mainUrl, subtitleCallback, callback)
                 }.getOrDefault(false)
-                if (!handled) emitDirectLink(url, callback)
+                if (!handled) selfExtract(url, callback)
             }
         }
     }
 
-    /** Se la catena finisce dritto su un file video, lo emette senza estrattore. */
+    /**
+     * Estrazione generica ("ricava i m3u8 da solo"): scarica la pagina finale e
+     * cerca al suo interno il file video con le stesse regex a cascata degli
+     * estrattori dedicati. Copre i domini nuovi o cambiati senza toccare il codice.
+     */
+    private suspend fun selfExtract(url: String, callback: (ExtractorLink) -> Unit) {
+        val resp = shGet(url, referer = mainUrl + SHOW_PATH)
+        if (resp == null) {
+            Log.i(TAG, "selfExtract: richiesta fallita $url")
+            return
+        }
+        Log.i(TAG, "selfExtract: HTTP ${resp.code} su $url")
+        if (resp.code != 200) return
+        val body = resp.text
+        shFindM3u8(body)?.let {
+            Log.i(TAG, "selfExtract: m3u8 ricavato dalla pagina")
+            emitDirectLink(it, callback)
+            return
+        }
+        MEDIA_RE.find(body)?.value?.let { emitDirectLink(it, callback) }
+    }
+
+    /** Se l'URL e' un file video diretto lo emette senza estrattore; dice se l'ha fatto. */
     private suspend fun emitDirectLink(
         url: String,
         callback: (ExtractorLink) -> Unit,
-    ) {
-        val lower = url.substringBefore('?').lowercase()
+    ): Boolean {
+        val lower = url.substringBefore('#').substringBefore('?').lowercase()
         val type = when {
             lower.endsWith(".m3u8") -> com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8
             lower.endsWith(".mp4") || lower.endsWith(".mkv") ->
                 com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
-            else -> return
+            else -> return false
         }
         callback(
             com.lagradost.cloudstream3.utils.newExtractorLink(
@@ -560,5 +607,6 @@ class SisterHappy : MainAPI() {
                 this.quality = com.lagradost.cloudstream3.utils.Qualities.Unknown.value
             }
         )
+        return true
     }
 }

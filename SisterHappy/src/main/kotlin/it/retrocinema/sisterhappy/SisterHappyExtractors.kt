@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URI
 
 /**
  * Header condivisi, MINIMI come nelle implementazioni collaudate (estrattore
@@ -23,6 +24,11 @@ fun shFullHeaders(referer: String): Map<String, String> = mapOf(
     "Referer" to referer,
 )
 
+/** Header Cookie da un jar di cookie: il client dell'app NON ha cookie jar
+ *  (verificato nel sorgente CloudStream), quindi i cookie vanno rinviati a mano. */
+fun shCookieHeader(jar: Map<String, String>): String? =
+    if (jar.isEmpty()) null else jar.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
 /** Catena di regex m3u8 (stessa priorita' di MammaMia: sources/src -> file|src|url -> qualunque). */
 fun shFindM3u8(body: String): String? =
     Regex("sources:\\s*\\[\\s*\\{\\s*src:\\s*\"(https?://[^\"]+\\.m3u8[^\"]*)\"")
@@ -36,13 +42,15 @@ fun shFindM3u8(body: String): String? =
 
 /**
  * MaxStream. Due forme supportate:
- * 1. /uprots/<id> (link ottenuto da uprot): GET con redirect seguiti (uprots ->
- *    watchfree -> player) e m3u8 nel body finale; fallback: ricostruzione
- *    /emvvv/<id> dal path watchfree (trucco MammaMia) o iframe maxstream;
+ * 1. /uprots/<id> (link ottenuto da uprot): catena di redirect seguita A MANO
+ *    (allowRedirects=false): ogni salto raccoglie i cookie e li rinvia al
+ *    successivo, come fa il browser (uprots -> watchfree -> player); fallback:
+ *    ricostruzione /emvvv/<id> dal path watchfree (trucco MammaMia) o iframe
+ *    maxstream;
  * 2. pagina player legacy con script "eval(function(p,a,c,k,e,d)...)" da
  *    spacchettare (logica da provider CB01 GPL di DieGon7771).
  */
-class MaxStreamExtractor : ExtractorApi() {
+class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
     override var name = "MaxStream"
     override var mainUrl = "https://maxstream.video/"
     override val requiresReferer = false
@@ -60,27 +68,55 @@ class MaxStreamExtractor : ExtractorApi() {
         }
     }
 
-    /** Catena moderna: uprots -> (redirect) -> watchfree -> player -> m3u8. */
+    /** Catena moderna: uprots -> (redirect a mano con cookie) -> watchfree -> player -> m3u8. */
     private suspend fun extractFromUprots(url: String, callback: (ExtractorLink) -> Unit) {
-        val headers = shFullHeaders(referer = "https://uprot.net/")
-        val response = runCatching {
-            app.get(url, headers = headers, timeout = 15)
-        }.getOrNull() ?: return
-        if (response.code != 200) {
-            Log.d(name, "uprots GET status ${response.code} url finale ${runCatching { response.url }.getOrDefault(url)}")
+        var current = url
+        var jar: MutableMap<String, String> = mutableMapOf()
+        var body: String? = null
+        for (hop in 0 until 6) {
+            if (deadline > 0 && System.currentTimeMillis() > deadline) {
+                Log.d(name, "uprots: deadline raggiunta al salto $hop")
+                return
+            }
+            val headers = shFullHeaders(referer = "https://uprot.net/").toMutableMap()
+            shCookieHeader(jar)?.let { headers["Cookie"] = it }
+            val resp = runCatching {
+                app.get(current, headers = headers, timeout = 12, allowRedirects = false)
+            }.getOrNull() ?: return
+            jar.putAll(resp.cookies)
+            when {
+                resp.code in 300..399 -> {
+                    val loc = resp.headers.values("location").firstOrNull()?.trim()
+                    if (loc.isNullOrEmpty()) {
+                        Log.d(name, "uprots: redirect senza Location da $current")
+                        return
+                    }
+                    current = runCatching { URI(current).resolve(loc).toString() }.getOrNull() ?: return
+                }
+                resp.code == 200 -> {
+                    body = resp.text
+                    break
+                }
+                else -> {
+                    Log.d(name, "uprots GET status ${resp.code} su $current")
+                    return
+                }
+            }
+        }
+        val finalBody = body ?: run {
+            Log.d(name, "uprots: nessuna pagina 200 nella catena")
             return
         }
-        val body = response.text
-        val finalUrl = runCatching { response.url }.getOrDefault(url)
+        val finalUrl = current
 
         // Caso comune: m3u8 gia' nel body finale della catena
-        shFindM3u8(body)?.let { emit(it, callback); return }
+        shFindM3u8(finalBody)?.let { emit(it, callback); return }
 
         // Fallback: watchfree/<x>/<y>/ -> /emvvv/<y> (pagina player reale);
         // variante a segmento singolo watchfree/<x> -> /emvvv/<x>.
         val watchfreeUrl = if (finalUrl.contains("watchfree/")) finalUrl
         else Regex("https?://[\\w.-]*maxstream\\.video/watchfree/[^\\s'\"<>]+", RegexOption.IGNORE_CASE)
-            .find(body)?.value
+            .find(finalBody)?.value
         if (watchfreeUrl != null) {
             val parts = watchfreeUrl.substringAfter("watchfree/").trimEnd('/').split('/')
             val playerUrls = mutableListOf<String>()
@@ -108,7 +144,7 @@ class MaxStreamExtractor : ExtractorApi() {
         Regex(
             "<iframe[^>]+src=['\"](https?://[^'\"]*maxstream[^'\"]*?/[a-z0-9_-]+/[a-z0-9]+)['\"]",
             RegexOption.IGNORE_CASE
-        ).find(body)?.groupValues?.get(1)?.let { iframe ->
+        ).find(finalBody)?.groupValues?.get(1)?.let { iframe ->
             val iframeResp = runCatching {
                 app.get(iframe, headers = shFullHeaders(referer = finalUrl), timeout = 12)
             }.getOrNull()
@@ -119,7 +155,7 @@ class MaxStreamExtractor : ExtractorApi() {
         }
 
         // Ultima spiaggia: script packed nella pagina finale
-        unpackSource(body)?.let { emit(it, callback) }
+        unpackSource(finalBody)?.let { emit(it, callback) }
     }
 
     /** Forma legacy: pagina player con evalpacked (vecchio formato). */
