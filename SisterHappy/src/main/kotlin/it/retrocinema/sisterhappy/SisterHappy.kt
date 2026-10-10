@@ -21,6 +21,9 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
@@ -322,8 +325,21 @@ class SisterHappy : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episode = tryParseJson<ShEpisodeData>(data) ?: return false
+        // Il challenge Cloudflare dei protettori a volte viene risolto solo al
+        // secondo colpo (i cookie restano nella cache di cfKiller): se il primo
+        // pass non ha emesso nulla si ritenta subito. Il "||" evita doppioni:
+        // il secondo pass parte SOLO se il primo non ha dato nessun link.
+        return tryAllLinks(episode.links, subtitleCallback, callback)
+            || tryAllLinks(episode.links, subtitleCallback, callback)
+    }
+
+    private suspend fun tryAllLinks(
+        links: List<ShLink>,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+    ): Boolean {
         var found = false
-        for (link in episode.links) {
+        for (link in links) {
             if (link.url.isBlank()) continue
             var emitted = false
             val wrapped: (ExtractorLink) -> Unit = { l ->
@@ -379,10 +395,18 @@ class SisterHappy : MainAPI() {
 
     /**
      * uprot.net: trucco MammaMia "msf -> mse" (la variante /mse/ NON mostra il captcha),
-     * poi 30x o pagina con anchor CONTINUE verso maxstream/uprots o clicka/adelta.
+     * ritentando anche l'URL originale /msf/ se la variante non risponde; poi 30x o
+     * pagina con anchor CONTINUE verso maxstream/uprots o clicka/adelta.
      */
     private suspend fun walkUprot(url: String, hops: Int): String? {
         val probe = if (url.contains("/msf/")) url.replace("/msf/", "/mse/") else url
+        for (candidate in listOf(probe, url).distinct()) {
+            attemptUprot(candidate, hops)?.let { return it }
+        }
+        return null
+    }
+
+    private suspend fun attemptUprot(probe: String, hops: Int): String? {
         val headers = fullHeaders(referer = "https://uprot.net/")
         val resp = getNoRedirect(probe, headers) ?: return null
 
@@ -398,11 +422,63 @@ class SisterHappy : MainAPI() {
         UPROTS_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
         ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
         extractDestination(html)?.let { return walkProtector(absolutize(probe, it), hops + 1) }
+        // Ultima riserva: primi anchor generici della pagina (le catene finte si
+        // fermano da sole perche' walkProtector ritorna null sugli host inutili)
+        val anchors = ANCHOR_RE.findAll(html)
+            .map { it.groupValues[1] }
+            .filter { it.startsWith("http") && it != probe }
+            .take(3)
+            .toList()
+        for (href in anchors) {
+            walkProtector(href, hops + 1)?.let { return it }
+        }
         return null
     }
 
-    /** clicka.cc (e safego.cc): 30x verso safego/adelta/deltabit oppure pagina con link adelta. */
+    /**
+     * Via AJAX del protettore clicka.cc (stessa piattaforma di stayonline, viste
+     * in produzione nel plugin italiano MultiSite): POST /ajax/linkEmbedView.php
+     * con id=<token> risponde JSON {"data":{"value":"<url>"}} con il link FINALE,
+     * saltando pagina HTML e challenge. Fallback sull'endpoint /ajax/linkView.php.
+     */
+    private suspend fun clickaAjax(url: String): String? {
+        val id = url.trimEnd('/').substringAfterLast('/')
+        if (id.isBlank()) return null
+        val body = "id=$id&ref=".toRequestBody(
+            "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
+        )
+        for (endpoint in listOf("linkEmbedView.php", "linkView.php")) {
+            val resp = runCatching {
+                app.post(
+                    "https://clicka.cc/ajax/$endpoint",
+                    headers = fullHeaders(referer = url, origin = "https://clicka.cc")
+                        .plus(
+                            mapOf(
+                                "Accept" to "application/json, text/javascript, */*; q=0.01",
+                                "X-Requested-With" to "XMLHttpRequest",
+                                "Sec-Fetch-Dest" to "empty",
+                                "Sec-Fetch-Mode" to "cors",
+                            )
+                        ),
+                    requestBody = body,
+                    timeout = 15_000,
+                    interceptor = cfKiller,
+                )
+            }.getOrNull() ?: continue
+            val value = runCatching {
+                JSONObject(resp.text).optJSONObject("data")?.optString("value") ?: ""
+            }.getOrDefault("")
+            if (value.startsWith("http")) return value
+        }
+        return null
+    }
+
+    /** clicka.cc (e safego.cc): via AJAX, poi 30x verso safego/adelta/deltabit, poi pagina HTML. */
     private suspend fun walkClicka(url: String, hops: Int): String? {
+        // 1. AJAX: la risposta e' il link finale (deltabit/mixdrop/maxstream)
+        clickaAjax(url)?.let { return walkProtector(it, hops + 1) }
+
+        // 2. GET senza redirect: 30x con Location verso la catena
         val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://clicka.cc"))
             ?: return null
         val location = resp.headers["location"]

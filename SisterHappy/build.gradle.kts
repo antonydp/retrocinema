@@ -1,5 +1,5 @@
 // SisterHappy - una serie, tutta in italiano, pronta da guardare
-version = 2
+version = 3
 
 cloudstream {
     description = "Una sola serie TV, tutta in italiano: tutte le stagioni con i loro episodi, aggiornata quando escono puntate nuove. Link MaxStream, DeltaBit e MixDrop aperti in automatico anche dietro i protettori di link, con riprova automatica e scambio di dominio al volo. Semplice da usare: apri, scegli l'episodio, guarda. La home mostra subito la scheda della serie."
