@@ -45,6 +45,22 @@ data class ShEpisodeData(
 )
 
 /**
+ * Tetto rigido per una singola loadLinks: senza limite i tentativi di riserva
+ * (anchor generici, varianti mse/msf, secondo pass) possono catenare decine di
+ * richieste e l'app resta "in caricamento" per minuti. Ogni URL viene richiesto
+ * AL MASSIMO UNA VOLTA per episodio e si rispettano scadenza e conteggio.
+ */
+private class ShBudget(val maxRequests: Int, val deadline: Long) {
+    var used = 0
+    val visited = mutableSetOf<String>()
+
+    fun can(): Boolean = used < maxRequests && System.currentTimeMillis() < deadline
+
+    /** Registra l'URL: false se era gia' stato richiesto (da non richiedere di nuovo). */
+    fun mark(url: String): Boolean = visited.add(url.substringBefore('#'))
+}
+
+/**
  * SisterHappy - estensione dedicata a UNA sola serie TV italiana.
  *
  * La pagina del sito e una classica pagina "serie" WordPress:
@@ -132,9 +148,15 @@ class SisterHappy : MainAPI() {
         return headers
     }
 
-    private suspend fun getNoRedirect(url: String, headers: Map<String, String>) = runCatching {
-        app.get(url, allowRedirects = false, headers = headers, timeout = 20_000, interceptor = cfKiller)
-    }.getOrNull()
+    /** GET senza redirect, solo se il budget lo consente e l'URL non e' gia' stato chiesto. */
+    private suspend fun getNoRedirect(url: String, headers: Map<String, String>, budget: ShBudget) =
+        if (!budget.can() || !budget.mark(url)) null
+        else {
+            budget.used++
+            runCatching {
+                app.get(url, allowRedirects = false, headers = headers, timeout = 10_000, interceptor = cfKiller)
+            }.getOrNull()
+        }
 
     // ------------------------------------------------------------------
     //  HOME: una sola riga con la scheda della serie
@@ -325,18 +347,24 @@ class SisterHappy : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val episode = tryParseJson<ShEpisodeData>(data) ?: return false
-        // Il challenge Cloudflare dei protettori a volte viene risolto solo al
-        // secondo colpo (i cookie restano nella cache di cfKiller): se il primo
-        // pass non ha emesso nulla si ritenta subito. Il "||" evita doppioni:
-        // il secondo pass parte SOLO se il primo non ha dato nessun link.
-        return tryAllLinks(episode.links, subtitleCallback, callback)
-            || tryAllLinks(episode.links, subtitleCallback, callback)
+        // Tetto rigido per TUTTA la risoluzione (primo + secondo pass condividono
+        // lo stesso budget): senza limite i tentativi di riserva possono catenare
+        // decine di richieste e l'app resta "in caricamento" per minuti.
+        val budget = ShBudget(
+            maxRequests = 20,
+            deadline = System.currentTimeMillis() + 35_000,
+        )
+        // Il challenge Cloudflare a volte viene risolto solo al secondo colpo:
+        // se il primo pass non ha emesso nulla si ritenta con il budget residuo.
+        return tryAllLinks(episode.links, subtitleCallback, callback, budget)
+            || tryAllLinks(episode.links, subtitleCallback, callback, budget)
     }
 
     private suspend fun tryAllLinks(
         links: List<ShLink>,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
+        budget: ShBudget,
     ): Boolean {
         var found = false
         for (link in links) {
@@ -348,7 +376,7 @@ class SisterHappy : MainAPI() {
                 callback(l)
             }
             runCatching {
-                resolveAndExtract(link.url, subtitleCallback, wrapped)
+                resolveAndExtract(link.url, subtitleCallback, wrapped, budget)
             }
         }
         return found
@@ -359,8 +387,10 @@ class SisterHappy : MainAPI() {
         url: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
+        budget: ShBudget,
     ) {
-        val finalUrl = walkProtector(url, 0) ?: return
+        if (!budget.can()) return
+        val finalUrl = walkProtector(url, 0, budget) ?: return
         when {
             finalUrl.contains("maxstream", ignoreCase = true) ->
                 MaxStreamExtractor().getUrl(finalUrl, mainUrl, subtitleCallback, callback)
@@ -383,12 +413,12 @@ class SisterHappy : MainAPI() {
      * uprot.net -> maxstream.video/uprots/... (o clicka/adelta), clicka.cc -> deltabit,
      * con livello captcha safego.cc quando presente.
      */
-    private suspend fun walkProtector(url: String, hops: Int): String? {
+    private suspend fun walkProtector(url: String, hops: Int, budget: ShBudget): String? {
         if (hops > 6) return null
         return when {
             LEAF_HOSTS.any { url.contains(it, true) } -> url
-            url.contains("uprot.net", true) -> walkUprot(url, hops)
-            url.contains("clicka.cc", true) || url.contains("safego.cc", true) -> walkClicka(url, hops)
+            url.contains("uprot.net", true) -> walkUprot(url, hops, budget)
+            url.contains("clicka.cc", true) || url.contains("safego.cc", true) -> walkClicka(url, hops, budget)
             else -> url // host diretto non noto: il chiamante prova gli estrattori dell'app
         }
     }
@@ -398,39 +428,41 @@ class SisterHappy : MainAPI() {
      * ritentando anche l'URL originale /msf/ se la variante non risponde; poi 30x o
      * pagina con anchor CONTINUE verso maxstream/uprots o clicka/adelta.
      */
-    private suspend fun walkUprot(url: String, hops: Int): String? {
+    private suspend fun walkUprot(url: String, hops: Int, budget: ShBudget): String? {
         val probe = if (url.contains("/msf/")) url.replace("/msf/", "/mse/") else url
         for (candidate in listOf(probe, url).distinct()) {
-            attemptUprot(candidate, hops)?.let { return it }
+            attemptUprot(candidate, hops, budget)?.let { return it }
         }
         return null
     }
 
-    private suspend fun attemptUprot(probe: String, hops: Int): String? {
+    private suspend fun attemptUprot(probe: String, hops: Int, budget: ShBudget): String? {
         val headers = fullHeaders(referer = "https://uprot.net/")
-        val resp = getNoRedirect(probe, headers) ?: return null
+        val resp = getNoRedirect(probe, headers, budget) ?: return null
 
         val location = resp.headers["location"]
         if (!location.isNullOrBlank()) {
-            return walkProtector(absolutize(probe, location), hops + 1)
+            return walkProtector(absolutize(probe, location), hops + 1, budget)
         }
 
         val html = resp.text
         if (isCaptchaPage(html)) return null
-        followContinue(html, probe, hops)?.let { return it }
+        followContinue(html, probe, hops, budget)?.let { return it }
         // Fallback: primo URL uprots/adelta grezzo nel body
-        UPROTS_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
-        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
-        extractDestination(html)?.let { return walkProtector(absolutize(probe, it), hops + 1) }
-        // Ultima riserva: primi anchor generici della pagina (le catene finte si
-        // fermano da sole perche' walkProtector ritorna null sugli host inutili)
-        val anchors = ANCHOR_RE.findAll(html)
-            .map { it.groupValues[1] }
-            .filter { it.startsWith("http") && it != probe }
-            .take(3)
-            .toList()
-        for (href in anchors) {
-            walkProtector(href, hops + 1)?.let { return it }
+        UPROTS_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
+        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
+        extractDestination(html)?.let { return walkProtector(absolutize(probe, it), hops + 1, budget) }
+        // Ultima riserva SOLO vicino alla radice: primi anchor generici della
+        // pagina (con hops bassi la ramificazione resta limitata dal budget)
+        if (hops <= 1) {
+            val anchors = ANCHOR_RE.findAll(html)
+                .map { it.groupValues[1] }
+                .filter { it.startsWith("http") && it != probe }
+                .take(2)
+                .toList()
+            for (href in anchors) {
+                walkProtector(href, hops + 1, budget)?.let { return it }
+            }
         }
         return null
     }
@@ -441,13 +473,15 @@ class SisterHappy : MainAPI() {
      * con id=<token> risponde JSON {"data":{"value":"<url>"}} con il link FINALE,
      * saltando pagina HTML e challenge. Fallback sull'endpoint /ajax/linkView.php.
      */
-    private suspend fun clickaAjax(url: String): String? {
+    private suspend fun clickaAjax(url: String, budget: ShBudget): String? {
         val id = url.trimEnd('/').substringAfterLast('/')
         if (id.isBlank()) return null
         val body = "id=$id&ref=".toRequestBody(
             "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
         )
         for (endpoint in listOf("linkEmbedView.php", "linkView.php")) {
+            if (!budget.can() || !budget.mark("https://clicka.cc/ajax/$endpoint?id=$id")) continue
+            budget.used++
             val resp = runCatching {
                 app.post(
                     "https://clicka.cc/ajax/$endpoint",
@@ -461,7 +495,7 @@ class SisterHappy : MainAPI() {
                             )
                         ),
                     requestBody = body,
-                    timeout = 15_000,
+                    timeout = 10_000,
                     interceptor = cfKiller,
                 )
             }.getOrNull() ?: continue
@@ -474,42 +508,42 @@ class SisterHappy : MainAPI() {
     }
 
     /** clicka.cc (e safego.cc): via AJAX, poi 30x verso safego/adelta/deltabit, poi pagina HTML. */
-    private suspend fun walkClicka(url: String, hops: Int): String? {
+    private suspend fun walkClicka(url: String, hops: Int, budget: ShBudget): String? {
         // 1. AJAX: la risposta e' il link finale (deltabit/mixdrop/maxstream)
-        clickaAjax(url)?.let { return walkProtector(it, hops + 1) }
+        clickaAjax(url, budget)?.let { return walkProtector(it, hops + 1, budget) }
 
         // 2. GET senza redirect: 30x con Location verso la catena
-        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://clicka.cc"))
+        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://clicka.cc"), budget)
             ?: return null
         val location = resp.headers["location"]
         if (!location.isNullOrBlank()) {
             val next = absolutize(url, location)
             if (next.contains("safego", ignoreCase = true)) {
-                return walkSafego(next, hops)
+                return walkSafego(next, hops, budget)
             }
-            return walkProtector(next, hops + 1)
+            return walkProtector(next, hops + 1, budget)
         }
 
         val html = resp.text
         if (isCaptchaPage(html)) return null
-        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
-        followContinue(html, url, hops)?.let { return it }
-        extractDestination(html)?.let { return walkProtector(absolutize(url, it), hops + 1) }
+        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
+        followContinue(html, url, hops, budget)?.let { return it }
+        extractDestination(html)?.let { return walkProtector(absolutize(url, it), hops + 1, budget) }
         return null
     }
 
     /** Livello captcha safego.cc: se l'IP e gia noto, reindirizza o contiene il link adelta. */
-    private suspend fun walkSafego(url: String, hops: Int): String? {
-        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://safego.cc"))
+    private suspend fun walkSafego(url: String, hops: Int, budget: ShBudget): String? {
+        val resp = getNoRedirect(url, fullHeaders(referer = url, origin = "https://safego.cc"), budget)
             ?: return null
         val location = resp.headers["location"]
         if (!location.isNullOrBlank()) {
-            return walkProtector(absolutize(url, location), hops + 1)
+            return walkProtector(absolutize(url, location), hops + 1, budget)
         }
         val html = resp.text
         if (isCaptchaPage(html)) return null
-        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1) }
-        followContinue(html, url, hops)?.let { return it }
+        ADELTA_RE.find(html)?.value?.let { return walkProtector(it, hops + 1, budget) }
+        followContinue(html, url, hops, budget)?.let { return it }
         return null
     }
 
@@ -517,7 +551,7 @@ class SisterHappy : MainAPI() {
      * Anchor con testo CONTINUE: quello reale punta a maxstream/clicka/uprots/adelta
      * (le pagine possono contenere URL esca nascosti, quindi hanno priorita' i filtrati).
      */
-    private suspend fun followContinue(html: String, baseUrl: String, hops: Int): String? {
+    private suspend fun followContinue(html: String, baseUrl: String, hops: Int, budget: ShBudget): String? {
         val filtered = mutableListOf<String>()
         val generic = mutableListOf<String>()
         ANCHOR_RE.findAll(html).forEach { m ->
@@ -530,7 +564,7 @@ class SisterHappy : MainAPI() {
             }
         }
         for (href in filtered + generic) {
-            val dest = walkProtector(absolutize(baseUrl, href), hops + 1)
+            val dest = walkProtector(absolutize(baseUrl, href), hops + 1, budget)
             if (dest != null) return dest
         }
         return null
