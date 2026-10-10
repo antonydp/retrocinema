@@ -67,7 +67,7 @@ class MaxStreamExtractor : ExtractorApi() {
             app.get(url, headers = headers, timeout = 15)
         }.getOrNull() ?: return
         if (response.code != 200) {
-            Log.d(name, "uprots GET status ${response.code}")
+            Log.d(name, "uprots GET status ${response.code} url finale ${runCatching { response.url }.getOrDefault(url)}")
             return
         }
         val body = response.text
@@ -76,20 +76,31 @@ class MaxStreamExtractor : ExtractorApi() {
         // Caso comune: m3u8 gia' nel body finale della catena
         shFindM3u8(body)?.let { emit(it, callback); return }
 
-        // Fallback: watchfree/<x>/<y>/ -> /emvvv/<y> (pagina player reale)
+        // Fallback: watchfree/<x>/<y>/ -> /emvvv/<y> (pagina player reale);
+        // variante a segmento singolo watchfree/<x> -> /emvvv/<x>.
         val watchfreeUrl = if (finalUrl.contains("watchfree/")) finalUrl
         else Regex("https?://[\\w.-]*maxstream\\.video/watchfree/[^\\s'\"<>]+", RegexOption.IGNORE_CASE)
             .find(body)?.value
         if (watchfreeUrl != null) {
             val parts = watchfreeUrl.substringAfter("watchfree/").trimEnd('/').split('/')
+            val playerUrls = mutableListOf<String>()
             if (parts.size >= 2 && parts[1].isNotBlank()) {
-                val playerUrl = "https://maxstream.video/emvvv/${parts[1]}"
+                playerUrls.add("https://maxstream.video/emvvv/${parts[1]}")
+            }
+            if (parts.isNotEmpty() && parts[0].isNotBlank()) {
+                playerUrls.add("https://maxstream.video/emvvv/${parts[0]}")
+            }
+            for (playerUrl in playerUrls.distinct()) {
+                Log.d(name, "provo player $playerUrl")
                 val playerResp = runCatching {
                     app.get(playerUrl, headers = shFullHeaders(referer = finalUrl), timeout = 12)
-                }.getOrNull()
-                if (playerResp != null && playerResp.code == 200) {
-                    shFindM3u8(playerResp.text)?.let { emit(it, callback); return }
+                }.getOrNull() ?: continue
+                if (playerResp.code != 200) {
+                    Log.d(name, "player HTTP ${playerResp.code}")
+                    continue
                 }
+                shFindM3u8(playerResp.text)?.let { emit(it, callback); return }
+                unpackSource(playerResp.text)?.let { emit(it, callback); return }
             }
         }
 

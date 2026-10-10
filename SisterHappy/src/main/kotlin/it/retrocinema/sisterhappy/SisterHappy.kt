@@ -1,5 +1,6 @@
 package it.retrocinema.sisterhappy
 
+import com.lagradost.api.Log
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -78,7 +79,7 @@ class SisterHappy : MainAPI() {
         const val SHOW_PATH = "/x-factor-53/"
 
         /** Host video finali riconosciuti come "foglia" della catena. */
-        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop")
+        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop", "mxdrop")
 
         /** Tempo massimo dell'intera risoluzione di un episodio. */
         private const val DEADLINE_MS = 45_000L
@@ -93,14 +94,13 @@ class SisterHappy : MainAPI() {
 
         /** URL verso un host video noto, in qualunque parte del codice HTML. */
         private val KNOWN_HOST_RE = Regex(
-            "https?://[\\w.-]*(?:maxstream|deltabit|mixdrop)[\\w.-]*/[^\\s\"'<>]+",
+            "https?://[\\w.-]*(?:maxstream|deltabit|mixdrop|mxdrop)[\\w.-]*/[^\\s\"'<>]+",
             RegexOption.IGNORE_CASE
         )
 
         /**
-         * Anchor "Continue" delle pagine uprot: href catturato nel gruppo 1
-         * (schema ufficiale: recloudstream UnshortenUrl.kt, Toonitalia, CB01).
-         * Nessun DOT_MATCHES_ALL: il match resta sulla singola riga.
+         * Anchor "Continue" delle pagine uprot: gestito via jsoup in parseUprotPage
+         * (testo anche spaziato "C O N T I N U E"). Nessun DOT_MATCHES_ALL.
          */
         private val CONTINUE_RE = Regex("""<a[^>]+href="([^"]+)".*?Continue""", RegexOption.IGNORE_CASE)
 
@@ -112,6 +112,9 @@ class SisterHappy : MainAPI() {
             "(?:window\\.)?location(?:\\.href|\\.replace\\(\\s*)?\\s*[=(]\\s*[\"']([^\"']+)[\"']",
             RegexOption.IGNORE_CASE
         )
+
+        /** Tag per i log diagnostici (visibili nel visualizzatore log dell'app). */
+        private const val TAG = "SisterHappy"
     }
 
     private fun navHeaders(referer: String? = null): Map<String, String> {
@@ -337,9 +340,11 @@ class SisterHappy : MainAPI() {
             if (System.currentTimeMillis() >= deadline || link.url.isBlank()) false
             else runCatching {
                 resolveAndExtract(link.url, deadline, subtitleCallback, callback)
-            }.getOrDefault(false)
+            }.onFailure { Log.e(TAG, "errore su ${link.url}: ${it.message}") }.getOrDefault(false)
         }
-        return results.any { it }
+        val ok = results.any { it }
+        Log.i(TAG, "loadLinks finito: $ok su ${ordered.size} link")
+        return ok
     }
 
     /** Risolve l'eventuale protettore con una catena lineare e delega all'estrattore finale. */
@@ -363,6 +368,7 @@ class SisterHappy : MainAPI() {
             else -> url // host diretto non noto: si prova comunque loadExtractor
         } ?: return false
 
+        Log.i(TAG, "host finale raggiunto: $target")
         extractFinal(target, subtitleCallback, wrapped)
         return emitted
     }
@@ -382,8 +388,21 @@ class SisterHappy : MainAPI() {
 
             var next: String? = null
             for (candidate in candidates) {
-                val resp = shGet(candidate, referer = mainUrl + SHOW_PATH) ?: continue
-                next = parseUprotPage(resp.text) ?: continue
+                val resp = shGet(candidate, referer = mainUrl + SHOW_PATH)
+                if (resp == null) {
+                    Log.i(TAG, "uprot: richiesta fallita (DNS/rete/timeout) $candidate")
+                    continue
+                }
+                Log.i(TAG, "uprot: HTTP ${resp.code} su $candidate")
+                if (resp.code == 403) {
+                    Log.i(TAG, "uprot: blocco 403 (WAF/bot) su $candidate")
+                    continue
+                }
+                next = parseUprotPage(resp.text, resp.document)
+                if (next == null) {
+                    Log.i(TAG, "uprot: nessun Continue/host trovato nella pagina $candidate")
+                    continue
+                }
                 break
             }
             if (next == null) return null
@@ -393,15 +412,41 @@ class SisterHappy : MainAPI() {
         return null
     }
 
-    /** Parsing della pagina uprot: anchor Continue, poi URL host noto, poi redirect JS/meta. */
-    private fun parseUprotPage(html: String): String? {
+    /**
+     * Parsing della pagina uprot. Prima via jsoup: anchor con testo "Continue"
+     * (anche con lettere spaziate "C O N T I N U E", come su MammaMia) — vale
+     * l'ULTIMO anchor Continue, come fa MammaMia. Poi URL host noto nel sorgente
+     * grezzo, poi anchor generici verso host noti, poi redirect JS/meta.
+     */
+    private fun parseUprotPage(html: String, doc: Element): String? {
+        var continueHref: String? = null
+        for (a in doc.select("a[href]")) {
+            val text = a.text().replace(Regex("\\s+"), "").uppercase()
+            if (text.contains("CONTINUE")) continueHref = a.attr("abs:href")
+        }
+        continueHref?.let { href ->
+            if (href.startsWith("http") && (isLeafHost(href) || href.contains("uprot.net", true))) {
+                Log.i(TAG, "uprot: anchor Continue -> $href")
+                return href
+            }
+            Log.i(TAG, "uprot: anchor Continue scartato -> $href")
+        }
+        // Riserva: regex grezza sulla stessa riga (page con markup semplice)
         CONTINUE_RE.findAll(html).forEach { m ->
             val href = m.groupValues[1].trim()
-            if (href.startsWith("http") && (isLeafHost(href) || href.contains("uprot.net", true))) {
+            if (href.startsWith("http") && isLeafHost(href)) return href
+        }
+        KNOWN_HOST_RE.find(html)?.value?.let {
+            Log.i(TAG, "uprot: URL host noto nel sorgente -> $it")
+            return it
+        }
+        for (a in doc.select("a[href]")) {
+            val href = a.attr("abs:href")
+            if (href.startsWith("http") && isLeafHost(href)) {
+                Log.i(TAG, "uprot: anchor host noto -> $href")
                 return href
             }
         }
-        KNOWN_HOST_RE.find(html)?.value?.let { return it }
         return htmlRedirect(html)
     }
 
@@ -434,7 +479,12 @@ class SisterHappy : MainAPI() {
                     requestBody = body,
                     timeout = HTTP_TIMEOUT_S,
                 )
-            }.getOrNull() ?: continue
+            }.getOrNull()
+            if (resp == null) {
+                Log.i(TAG, "clicka AJAX: richiesta fallita $endpoint")
+                continue
+            }
+            Log.i(TAG, "clicka AJAX: HTTP ${resp.code} da $endpoint")
             if (resp.code != 200) continue
             // Se Cloudflare intercetta la POST la risposta e' HTML, non JSON:
             // JSONObject lancia e si passa all'endpoint successivo.
@@ -446,7 +496,12 @@ class SisterHappy : MainAPI() {
 
         // Ultima spiaggia: GET della pagina (redirect seguiti) e parse del corpo.
         if (System.currentTimeMillis() >= deadline) return null
-        val page = shGet(url, referer = mainUrl + SHOW_PATH) ?: return null
+        val page = shGet(url, referer = mainUrl + SHOW_PATH)
+        if (page == null) {
+            Log.i(TAG, "clicka: GET pagina fallito $url")
+            return null
+        }
+        Log.i(TAG, "clicka: GET pagina HTTP ${page.code}")
         KNOWN_HOST_RE.find(page.text)?.value?.let { return it }
         return htmlRedirect(page.text)
     }
@@ -467,7 +522,8 @@ class SisterHappy : MainAPI() {
         when {
             url.contains("maxstream", ignoreCase = true) ->
                 MaxStreamExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
-            url.contains("mixdrop", ignoreCase = true) ->
+            url.contains("mixdrop", ignoreCase = true) ||
+                url.contains("mxdrop", ignoreCase = true) ->
                 MixDropExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
             url.contains("deltabit", ignoreCase = true) ->
                 DeltaBitExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
