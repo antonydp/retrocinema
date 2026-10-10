@@ -35,12 +35,13 @@ https://raw.githubusercontent.com/antonydp/retrocinema/main/repo.json
 poi premi **Aggiungi repository** e attendi qualche secondo.
 
 ### Passo 4 — Installa i plugin
-Nell'elenco compaiono **due plugin**:
+Nell'elenco compaiono **tre plugin**:
 
 - **RetroCinema** — il catalogo curato: film d'epoca e nuovi, tutto verificato in italiano. *Consigliato per iniziare.*
 - **StreamingCommunity** — lo stesso sito che conosci, con la home organizzata come si deve: **Top 10 serie, Top 10 film, Tendenze di adesso, Aggiunti di recente**, poi tutti i generi **ordinati per tendenza** (commedie, storie d'amore, famiglia, animazione…) e in fondo le annate 2026/2025/2024. **Ogni riga a scroll infinito** con migliaia di titoli in italiano e 1080p FHD. Ha anche un **menu impostazioni** per riordinare/nascondere le sezioni (vedi sotto).
+- **SisterHappy** — un'estensione dedicata a UNA sola serie TV, pensata per essere semplicissima: nella home c'è subito la scheda con **tutte le stagioni**, dalle special del 2020 fino a quella in onda quest'anno, e per ogni episodio i link in italiano (**MaxStream** e **DeltaBit**, con **MixDrop** per lo speciale). Apri, scegli la puntata, guarda.
 
-Tocca **Installa** su uno o entrambi e poi **OK**.
+Tocca **Installa** su uno o più plugin e poi **OK**.
 
 ### Passo 5 — Torna alla Home
 Tocca il nome del fornitore in alto sulla home (o il pulsante delle categorie), scegli **RetroCinema**: le file di film d'epoca scorrono come su Netflix. 🍿
@@ -101,6 +102,16 @@ Da ottobre 2026 il plugin StreamingCommunity ha un **menu impostazioni proprio**
 
 Le scelte restano salvate sull'app anche dopo gli aggiornamenti del plugin.
 
+## 🎤 SisterHappy
+
+Un'estensione dedicata a una sola serie TV, per chi vuole solo quella: niente cataloghi, niente menu — la home del plugin mostra la scheda della serie e le stagioni (dalla speciale del 2020 a quella in corso), con la sinossi completa in italiano.
+
+Come funziona:
+- gli episodi sono letti direttamente dalla pagina ufficiale del sito, quindi **appaiono da soli quando escono puntate nuove**;
+- ogni episodio offre **più host** quando disponibili (MaxStream, DeltaBit, MixDrop): se uno non va, ne provi un altro dal menu sorgenti del player;
+- i link sono protetti da servizi "accorcia-link": il plugin li **apre in automatico** (redirect, form e iniziale Cloudflare compresi) e in caso di errore **riprova**;
+- la **ricerca** dentro il plugin cerca nel sito (pagine serie) e torna utile se la pagina della serie cambia indirizzo: basterà aprire il nuovo risultato.
+
 ## 🆘 Problemi comuni
 
 **"Non riesco ad aggiungere la repository"** — Alcuni gestori telefonici italiani bloccano gli indirizzi `raw.githubusercontent.com`. Attiva una **VPN qualsiasi** sul telefono solo per il momento in cui aggiungi la repository, poi la puoi disattivare.
@@ -130,13 +141,18 @@ retrocinema/
 │       ├── Catalogo.kt              ← catalogo verificato generato da script
 │       └── RetroCinemaPlugin.kt     ← registrazione del provider
 └── StreamingCommunity/         ← modulo 2 = plugin .cs3 StreamingCommunity completo
-    └── src/main/kotlin/it/retrocinema/streamingcommunity/
-        ├── StreamingCommunity.kt       ← home dinamica, retry, sessione, ricerca paginata
-        ├── ScSections.kt               ← catalogo sezioni + preset + salvataggio scelte
-        ├── StreamingCommunitySettings.kt ← menu impostazioni (riordina/nasconde sezioni)
-        ├── StreamingCommunityDTOs.kt   ← DTO Jackson tolleranti + query delle righe
-        ├── VixCloudExtractor.kt        ← player VixCloud (CloudflareKiller)
-        └── VixSrcExtractor.kt          ← fallback VixSrc (permalink tmdb)
+│   └── src/main/kotlin/it/retrocinema/streamingcommunity/
+│       ├── StreamingCommunity.kt       ← home dinamica, retry, sessione, ricerca paginata
+│       ├── ScSections.kt               ← catalogo sezioni + preset + salvataggio scelte
+│       ├── StreamingCommunitySettings.kt ← menu impostazioni (riordina/nasconde sezioni)
+│       ├── StreamingCommunityDTOs.kt   ← DTO Jackson tolleranti + query delle righe
+│       ├── VixCloudExtractor.kt        ← player VixCloud (CloudflareKiller)
+│       └── VixSrcExtractor.kt          ← fallback VixSrc (permalink tmdb)
+└── SisterHappy/                ← modulo 3 = plugin .cs3 di una sola serie TV
+    └── src/main/kotlin/it/retrocinema/sisterhappy/
+        ├── SisterHappy.kt            ← pagina serie → stagioni/episodi + risolutore protettori
+        ├── SisterHappyExtractors.kt  ← host video finali (MaxStream, DeltaBit, MixDrop)
+        └── SisterHappyPlugin.kt      ← registrazione provider + estrattori
 ```
 
 ### Build automatica
@@ -158,10 +174,12 @@ Ogni push su `main`/`master` avvia **GitHub Actions**: il workflow esegue `./gra
 - **StreamingCommunity stream**: `/it/iframe/<id>&canPlayFHD=1` → iframe `vixcloud.co/embed/<id>?token=…` → script con `window.masterPlaylist` (URL + token + expires, ripulito da regex e contatore graffe) → **m3u8** con `&h=1` per il FHD. Fallback: `vixsrc.to/movie/<tmdb_id>` con lo stesso parser. Da PC/server il player è dietro Cloudflare (403): sul telefono passa automaticamente via **CloudflareKiller**.
 - **Paginazione**: `getMainPage(page, request)` con `hasNext=true` per lo scroll infinito per riga (l'app concatena gli item della pagina successiva nella stessa riga); `search(query, page)` sovrascritto con `SearchResponseList` per la ricerca a scroll infinito.
 - **Ricerca RaiPlay**: la pagina SSR `ricerca.html` è stata dismessa (SPA); la ricerca parte dal catalogo locale, continua su StreamingCommunity e Internet Archive. Il catalogo RaiPlay resta raggiungibile dalle righe della home.
+- **SisterHappy (modulo `SisterHappy/`)**: provider mono-serie su pagina "series-page" WordPress (theme th2). Parsing: `h1.entry-title` (titolo), prima `img` dell'`entry-content` (poster), sinossi completa (testo visibile + span nascosto del toggle, senza accordion) troncato a "Link disponibili"; episodi = `div.su-spoiler` (uno per stagione, titolo con "STAGIONE N") con righe divise sugli `<br>`, numero `N×NN` dal testo (regex `[x×]`), fallback contatore + hint stagione; le righe senza link (episodi non disponibili) sono saltate; i dati episodio (stagione, nome, lista link) viaggiano in JSON nel campo `data`. I link passano da **protettori** (uprot.net, clicka.cc — bloccati a IP datacenter, regolari da telefono): risolutore a 3 strategie (catena 302 con `allowRedirects=false` → meta refresh / JS / anchor verso host noto → form POST con campi nascosti) con **CloudflareKiller**; l'host finale viene dispatchato per nome a **MaxStream** (evalpacked → `src:`) — logica dal provider CB01 GPL di DieGon7771 —, **DeltaBit** e **MixDrop** (unpack + regex tolleranti `file:`/`wurl`/`<source>`/m3u8|mp4 grezzi); se il protettore reindirizza a un file video diretto, il link è emesso direttamente. Ricerca sul sito via `?s=` con filtro anti-pagine-utilità; home = scheda leggera della serie.
 
 ### Crediti e licenza
 - Pattern del provider Internet Archive dal provider ufficiale di **Luna712** ([recloudstream/extensions](https://github.com/recloudstream/extensions)).
 - Integrazione StreamingCommunity/VixCloud/VixSrc adattata dal provider **HadEnough** di **doGior** (GPL-3.0).
+- Estrattore MaxStream di SisterHappy adattato dal provider **CB01** di **DieGon7771** (GPL-3.0).
 - Progetto rilasciato con **licenza GPL-3.0** (vedi `LICENSE`).
 
 ### Nota legale
