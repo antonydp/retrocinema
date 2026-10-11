@@ -9,7 +9,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.delay
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
@@ -341,7 +340,9 @@ class DeltaBitExtractor(
         fields["imhuman"] = if (turbovid) "Proceed to video" else ""
         fields["referer"] = current
         note(if (turbovid) "db w5" else "db w2")
-        delay(if (turbovid) 5_000L else 2_500L)
+        // Attesa obbligatoria (MammaMia fa time.sleep): senza attesa il POST
+        // del player viene rifiutato. Il deadline viene ricontrollato dopo.
+        Thread.sleep(if (turbovid) 5_000L else 2_500L)
         if (deadline > 0 && System.currentTimeMillis() > deadline) {
             note("db deadline")
             return
