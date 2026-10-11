@@ -9,20 +9,39 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.delay
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
+import java.net.URLEncoder
 
 /**
- * Header condivisi, MINIMI come nelle implementazioni collaudate (estrattore
- * Maxstream ufficiale di CloudStream, CB01 di doGior, Toonitalia): solo
- * User-Agent, Accept, Accept-Language e Referer. Header Sec-Fetch-* in piu'
- * non aiutano e a volte buckiano i WAF.
+ * Header condivisi: SET COMPLETO da browser Chrome desktop, come il
+ * fake_headers usato da MammaMia (l'implementazione collaudata a ott. 2026).
+ * I protettori (uprot, safego/clicka) filtrano le richieste con header minimi:
+ * la v9 con solo UA/Accept riceveva pagine 200 SENZA il link Continue (traccia
+ * "u noCONT"). Il set completo e' cio' che le fa passare. Niente
+ * Accept-Encoding manuale: OkHttp gestisce da solo la compressione.
  */
-fun shFullHeaders(referer: String): Map<String, String> = mapOf(
+fun shFullHeaders(referer: String): Map<String, String> = mutableMapOf(
     "User-Agent" to SH_UA,
-    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language" to "it-IT,it;q=0.9,en;q=0.8",
-    "Referer" to referer,
-)
+    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language" to "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Upgrade-Insecure-Requests" to "1",
+    "sec-ch-ua" to "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "sec-ch-ua-mobile" to "?0",
+    "sec-ch-ua-platform" to "\"Windows\"",
+    "Sec-Fetch-Dest" to "document",
+    "Sec-Fetch-Mode" to "navigate",
+    "Sec-Fetch-Site" to "none",
+    "Sec-Fetch-User" to "?1",
+    "DNT" to "1",
+    "Sec-GPC" to "1",
+).also { if (referer.isNotBlank()) it["Referer"] = referer }
+
+/** User-Agent Firefox: MammaMia lo usa per il flusso safego/clicka. */
+const val SH_FF_UA =
+    "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0"
 
 /** Header Cookie da un jar di cookie: il client dell'app NON ha cookie jar
  *  (verificato nel sorgente CloudStream), quindi i cookie vanno rinviati a mano. */
@@ -226,10 +245,21 @@ class MaxStreamExtractor(
 }
 
 /**
- * DeltaBit: pagina player (domini deltabit vari, finali della catena clicka/adelta)
- * con sorgente dentro jwplayer o script packed. Estrazione tollerante.
+ * DeltaBit (e variante Turbovid): flusso COMPLETO MammaMia deltabit.py
+ * (aggiornato ott. 2026), che e' quello che oggi funziona nel browser:
+ * 1) GET con Range: bytes=0-0 e redirect A MANO (cookie raccolti a ogni
+ *    salto: il sito rinvia spesso a un nuovo path dello stesso host);
+ * 2) GET della pagina reale con Referer https://safego.cc/;
+ * 3) lettura di TUTTI i campi <input> nascosti (hash, fname, op, id, ...);
+ * 4) attesa 2,5 s (deltabit) o 5 s (turbovid): senza attesa il POST fallisce;
+ * 5) POST della stessa pagina con i campi + imhuman + referer: la risposta
+ *    contiene sources: ["....m3u8"].
+ * Fallback: regex dirette sulla pagina (comportamento v8/v9).
  */
-class DeltaBitExtractor(private val note: (String) -> Unit = {}) : ExtractorApi() {
+class DeltaBitExtractor(
+    private val deadline: Long = 0L,
+    private val note: (String) -> Unit = {},
+) : ExtractorApi() {
     override var name = "DeltaBit"
     override var mainUrl = "https://deltabit.co/"
     override val requiresReferer = false
@@ -240,18 +270,118 @@ class DeltaBitExtractor(private val note: (String) -> Unit = {}) : ExtractorApi(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
-        val response = runCatching {
-            app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 12)
-        }.getOrNull() ?: run { note("RETE"); return }
-        val body = response.body.string()
+        val turbovid = url.contains("turbovid", ignoreCase = true)
 
-        val link = shFindM3u8(body)
-            ?: findOtherSource(body)
-        if (link.isNullOrBlank()) {
-            Log.d(name, "Nessuna sorgente trovata in $url")
-            note("nosrc")
+        // 1) catena di redirect a mano con cookie e Range (header MammaMia)
+        var current = url
+        val jar = mutableMapOf<String, String>()
+        for (hop in 0 until 4) {
+            if (deadline > 0 && System.currentTimeMillis() > deadline) {
+                note("db deadline")
+                return
+            }
+            val headers = shFullHeaders(referer = referer ?: "https://safego.cc/").toMutableMap()
+            headers["Range"] = "bytes=0-0"
+            shCookieHeader(jar)?.let { headers["Cookie"] = it }
+            val resp = runCatching {
+                app.get(current, headers = headers, timeout = 12, allowRedirects = false)
+            }.getOrNull() ?: run { note("db RETE"); return }
+            jar.putAll(resp.cookies)
+            when {
+                resp.code in 300..399 -> {
+                    val loc = resp.headers.values("location").firstOrNull()?.trim()
+                    if (loc.isNullOrEmpty()) {
+                        Log.d(name, "redirect senza Location da $current")
+                        note("db noLoc")
+                        return
+                    }
+                    current = runCatching { URI(current).resolve(loc).toString() }
+                        .getOrNull() ?: run { note("db badLoc"); return }
+                }
+                resp.code == 200 -> break // pagina raggiunta: si prosegue col GET player
+                else -> {
+                    Log.d(name, "GET status ${resp.code} su $current")
+                    note("db ${resp.code}")
+                    return
+                }
+            }
+        }
+
+        // 2) GET della pagina reale con Referer safego (header MammaMia)
+        val headers2 = shFullHeaders(referer = "https://safego.cc/").toMutableMap()
+        shCookieHeader(jar)?.let { headers2["Cookie"] = it }
+        val page = runCatching {
+            app.get(current, headers = headers2, timeout = 12)
+        }.getOrNull() ?: run { note("db RETE2"); return }
+        jar.putAll(page.cookies)
+        if (page.code != 200) {
+            Log.d(name, "pagina player HTTP ${page.code} su $current")
+            note("db p${page.code}")
             return
         }
+        val doc = page.document
+
+        // Sorgente gia' nella pagina (fallback veloce, pagine semplici)
+        shFindM3u8(page.text)?.let { emit(it, current, callback); return }
+        findOtherSource(page.text)?.let { emit(it, current, callback); return }
+
+        // 3) campi nascosti della pagina
+        val fields = LinkedHashMap<String, String>()
+        doc.select("input").forEach { el ->
+            val nm = el.attr("name")
+            if (nm.isNotBlank()) fields[nm] = el.attr("value")
+        }
+        if (fields.isEmpty()) {
+            Log.d(name, "nessun form player in $current")
+            note("db noform")
+            return
+        }
+
+        // 4) imhuman + referer e attesa obbligatoria
+        fields["imhuman"] = if (turbovid) "Proceed to video" else ""
+        fields["referer"] = current
+        note(if (turbovid) "db w5" else "db w2")
+        delay(if (turbovid) 5_000L else 2_500L)
+        if (deadline > 0 && System.currentTimeMillis() > deadline) {
+            note("db deadline")
+            return
+        }
+
+        // 5) POST della stessa pagina con i campi + cookie
+        val host = runCatching { URI(current).host }.getOrDefault("deltabit.co")
+        val form = fields.entries.joinToString("&") { (k, v) ->
+            URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(v, "UTF-8")
+        }
+        val postHeaders = shFullHeaders(referer = current).toMutableMap()
+        postHeaders["Origin"] = "https://$host"
+        postHeaders["Content-Type"] = "application/x-www-form-urlencoded"
+        postHeaders["Sec-Fetch-Site"] = "same-origin"
+        shCookieHeader(jar)?.let { postHeaders["Cookie"] = it }
+        val post = runCatching {
+            app.post(
+                current,
+                headers = postHeaders,
+                requestBody = form.toRequestBody("application/x-www-form-urlencoded".toMediaTypeOrNull()),
+                timeout = 12,
+            )
+        }.getOrNull() ?: run { note("db pRETE"); return }
+        Log.d(name, "POST player HTTP ${post.code} su $current")
+        note("db p${post.code}")
+        if (post.code != 200) return
+
+        // La risposta contiene sources: ["https://....m3u8"] (formato MammaMia)
+        Regex("""sources:\s*\["([^"]+)""").find(post.text)
+            ?.groupValues?.get(1)?.let { emit(it, current, callback); return }
+        shFindM3u8(post.text)?.let { emit(it, current, callback); return }
+        findOtherSource(post.text)?.let { emit(it, current, callback); return }
+        note("nosrc")
+    }
+
+    private suspend fun emit(
+        link: String,
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit,
+    ) {
         note("EMIT")
         val isHls = link.substringBefore('?').lowercase().endsWith(".m3u8")
         callback.invoke(
@@ -261,7 +391,7 @@ class DeltaBitExtractor(private val note: (String) -> Unit = {}) : ExtractorApi(
                 url = link,
                 type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
             ) {
-                this.referer = url
+                this.referer = pageUrl
                 this.quality = Qualities.Unknown.value
             }
         )

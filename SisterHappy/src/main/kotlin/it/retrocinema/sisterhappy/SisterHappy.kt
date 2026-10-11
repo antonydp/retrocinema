@@ -25,10 +25,10 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 import java.net.InetAddress
+import java.net.URI
 
 /** User-Agent realistico da browser desktop. */
 const val SH_UA =
@@ -114,6 +114,21 @@ data class ShEpisodeData(
  *   sua traccia, FINE = riepilogo. Dicono esattamente dove muore la catena
  *   senza collegare il telefono al PC (i log completi restano nel TAG
  *   "SisterHappy" del visualizzatore log dell'app).
+ * Punti chiave della v10 (flussi MammaMia aggiornati a ott. 2026):
+ * - UPROT con header browser COMPLETI: Origin https://uprot.net/ + Referer del
+ *   link msf (stesso sito) + Sec-Fetch/sec-ch-ua, come fa MammaMia (che con
+ *   questo flusso funziona ancora oggi). La v9 con header minimi riceveva una
+ *   pagina 200 SENZA il link Continue (traccia "u noCONT u noCONT"). Traccia
+ *   nuova: "u chal" (interstiziale Cloudflare), "u capt" (pagina captcha).
+ * - CLICKA: eliminati gli AJAX linkEmbedView/linkView (ora rispondono 403:
+ *   traccia v9 "cA 403 cA 403"); al loro posto il flusso MammaMia
+ *   real_page: redirect a mano clicka->safego con cookie raccolti a ogni
+ *   salto + Range, poi POST della landing con cookie/Origin/Referer e
+ *   lettura del PRIMO anchor (= link dell'host video). Traccia "c capt" se
+ *   il protettore esige il captcha (MammaMia lo risolve con OCR).
+ * - DELTABIT: flusso completo MammaMia deltabit.py: redirect a mano, GET
+ *   player con Referer safego, TUTTI i campi input nascosti, attesa 2,5 s,
+ *   POST imhuman -> sources:["...m3u8"] (prima solo regex sulla pagina).
  * Punti chiave della v8 (diagnostica sul campo):
  * - RICERCA MONO-SERIE: il plugin risponde solo con la sua serie, mai risultati
  *   estranei del sito (il tester interno dell'app prova il PRIMO risultato di
@@ -142,7 +157,7 @@ class SisterHappy : MainAPI() {
         const val SHOW_PATH = "/x-factor-53/"
 
         /** Host video finali riconosciuti come "foglia" della catena. */
-        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop", "mxdrop")
+        private val LEAF_HOSTS = listOf("maxstream", "deltabit", "mixdrop", "mxdrop", "turbovid")
 
         /** Tempo massimo dell'intera risoluzione di un episodio. */
         private const val DEADLINE_MS = 45_000L
@@ -152,7 +167,7 @@ class SisterHappy : MainAPI() {
 
         /** URL verso un host video noto, in qualunque parte del codice HTML. */
         private val KNOWN_HOST_RE = Regex(
-            "https?://[\\w.-]*(?:maxstream|deltabit|mixdrop|mxdrop)[\\w.-]*/[^\\s\"'<>]+",
+            "https?://[\\w.-]*(?:maxstream|deltabit|mixdrop|mxdrop|turbovid)[\\w.-]*/[^\\s\"'<>]+",
             RegexOption.IGNORE_CASE
         )
 
@@ -181,19 +196,24 @@ class SisterHappy : MainAPI() {
         private const val TAG = "SisterHappy"
     }
 
-    private fun navHeaders(referer: String? = null): Map<String, String> {
-        val base = mapOf(
-            "User-Agent" to SH_UA,
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language" to "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.5",
-        )
-        return if (referer != null) base + mapOf("Referer" to referer) else base
-    }
+    /**
+     * Header di navigazione: SET COMPLETO da browser Chrome (shFullHeaders),
+     * non piu' il minimo della v9: i protettori filtrano le richieste povere
+     * di header servendo pagine senza i link (traccia v9 "u noCONT").
+     */
+    private fun navHeaders(referer: String? = null): Map<String, String> =
+        shFullHeaders(referer ?: "")
 
-    /** GET con header da browser, cookie opzionale e timeout corretto; mai lancia, al piu' null. */
-    private suspend fun shGet(url: String, referer: String? = null, cookie: String? = null) = runCatching {
-        val headers = if (cookie != null) navHeaders(referer) + mapOf("Cookie" to cookie)
+    /** GET con header da browser, cookie opzionale, header extra e timeout corretto; mai lancia, al piu' null. */
+    private suspend fun shGet(
+        url: String,
+        referer: String? = null,
+        cookie: String? = null,
+        extra: Map<String, String> = emptyMap(),
+    ) = runCatching {
+        var headers = if (cookie != null) navHeaders(referer) + mapOf("Cookie" to cookie)
         else navHeaders(referer)
+        if (extra.isNotEmpty()) headers = headers + extra
         app.get(url, headers = headers, timeout = HTTP_TIMEOUT_S)
     }.getOrNull()
 
@@ -216,9 +236,9 @@ class SisterHappy : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         // Plugin mono-serie: risponde SOLO con la sua pagina, e solo se la
-        // query e' coerente col titolo (lettere, spazi ignorati, cifre escluse:
-        // "x factor 20" conta come "xfactor"). Mai risultati estranei del sito:
-        // il tester dell'app prova il primo risultato trovato.
+        // query e' coerente col titolo (solo le LETTERE contano, cifre e spazi
+        // esclusi: cosi' "titolo 20" torna = slug della pagina). Mai risultati
+        // estranei del sito: il tester dell'app prova il primo risultato trovato.
         val q = query.lowercase().filter { it.isLetter() }.replace(" ", "")
         val slug = SHOW_PATH.filter { it.isLetter() }
         if (q.isEmpty() || !slug.contains(q)) return emptyList()
@@ -461,9 +481,11 @@ class SisterHappy : MainAPI() {
     /**
      * uprot.net: GET della pagina e lettura dell'anchor "Continue" verso l'host video.
      * Prima la variante /mse/ (senza captcha, trucco noto), poi l'originale /msf/.
-     * I cookie ricevuti dalla pagina vengono rinviati alle richieste seguenti
-     * (il client dell'app non ha cookie jar). Se il Continue rimanda a un'altra
-     * pagina uprot si segue per al massimo 2 salti.
+     * Header ESATTI MammaMia (uprot.py, ott. 2026): Origin https://uprot.net/ e
+     * Referer del LINK STESSO (pagina uprot, non eurostream!) sopra il set browser
+     * completo. La v9 inviava header minimi + referer eurostream e riceveva una
+     * pagina 200 senza Continue ("u noCONT u noCONT"). Cookie raccolti e rinviati;
+     * se il Continue rimanda a un'altra pagina uprot si segue per max 3 salti.
      */
     private suspend fun resolveUprot(idx: Int, url: String, deadline: Long): String? {
         var current = url
@@ -479,7 +501,13 @@ class SisterHappy : MainAPI() {
             var next: String? = null
             var jar: Map<String, String> = emptyMap()
             for (candidate in candidates) {
-                val resp = shGet(candidate, referer = mainUrl + SHOW_PATH, cookie = shCookieHeader(jar))
+                // Flusso MammaMia: Origin su uprot e Referer = link msf (stesso sito)
+                val resp = shGet(
+                    candidate,
+                    referer = current,
+                    cookie = shCookieHeader(jar),
+                    extra = mapOf("Origin" to "https://uprot.net/"),
+                )
                 if (resp == null) {
                     Log.i(TAG, "uprot: richiesta fallita (DNS/rete/timeout) $candidate")
                     shNote(idx, "u RETE")
@@ -496,7 +524,7 @@ class SisterHappy : MainAPI() {
                 next = parseUprotPage(resp.text, resp.document)
                 if (next == null) {
                     Log.i(TAG, "uprot: nessun Continue/host trovato nella pagina $candidate")
-                    shNote(idx, "u noCONT")
+                    shNote(idx, uprotFailNote(resp.text))
                     continue
                 }
                 break
@@ -512,6 +540,22 @@ class SisterHappy : MainAPI() {
         }
         shNote(idx, "u loop")
         return null
+    }
+
+    /**
+     * Classifica la pagina uprot che NON contiene il Continue: serve a capire
+     * a schermo se il problema e' Cloudflare (interstiziale), un captcha del
+     * protettore, o una pagina semplicemente senza link.
+     */
+    private fun uprotFailNote(html: String): String {
+        val low = html.lowercase()
+        return when {
+            low.contains("cf-chl") || low.contains("challenge-platform") ||
+                low.contains("just a moment") || low.contains("checking your browser") ||
+                low.contains("attention required") -> "u chal"
+            low.contains("captcha") -> "u capt"
+            else -> "u noCONT"
+        }
     }
 
     /**
@@ -557,77 +601,152 @@ class SisterHappy : MainAPI() {
     }
 
     /**
-     * clicka.cc: la pagina HTML e' spesso dietro Cloudflare, ma il flusso
-     * browser e' replicabile: 1) GET della pagina per raccogliere i cookie
-     * (il client dell'app non ha cookie jar, vanno rinviati a mano);
-     * 2) POST /ajax/linkEmbedView.php con id=<token> (ultimo segmento del
-     * path) e i cookie della pagina -> JSON {"data":{"value":"<url>"}};
-     * 3) fallback /ajax/linkView.php. Se "value" non e' un URL si cerca
-     * dentro redirect o file video.
+     * clicka.cc (DeltaBit/MixDrop): flusso MammaMia eurostreaming.py (ott. 2026),
+     * che e' quello che funziona ancora oggi nel browser -- i vecchi AJAX
+     * linkEmbedView/linkView della v8/v9 ora rispondono 403 e sono rimossi:
+     * 1) GET del link clicka con redirect A MANO (cookie raccolti a ogni salto,
+     *    header Range per un corpo minimo, come fa MammaMia) fino alla landing
+     *    reale (di norma safego.cc, a volte direttamente l'host video);
+     * 2) POST della landing con i cookie + Origin/Referer same-site e
+     *    User-Agent Firefox (scelta MammaMia): la risposta ha come PRIMO anchor
+     *    il link dell'host video;
+     * 3) se invece della pagina col link arriva un'immagine captcha (data URI),
+     *    il protettore esige l'OCR: traccia "c capt" (MammaMia lo risolve con
+     *    tesseract; qui per ora lo segnaliamo a schermo).
      */
     private suspend fun resolveClicka(idx: Int, url: String, deadline: Long): String? {
-        val id = url.trimEnd('/').substringAfterLast('/')
-        if (id.isBlank()) return null
-
-        // 1) GET della pagina: raccoglie i cookie e a volte contiene gia' la destinazione
-        var jar: Map<String, String> = emptyMap()
-        val page = shGet(url, referer = mainUrl + SHOW_PATH)
-        if (page == null) {
-            Log.i(TAG, "clicka: GET pagina fallito (DNS/rete/timeout) $url")
-            shNote(idx, "c RETE")
-        } else {
-            Log.i(TAG, "clicka: GET pagina HTTP ${page.code}")
-            shNote(idx, "c ${page.code}")
-            jar = page.cookies
-            if (page.code == 200) {
-                KNOWN_HOST_RE.find(page.text)?.value?.let { return it }
-                MEDIA_RE.find(page.text)?.value?.let { return it }
-                htmlRedirect(page.text)?.let { return it }
-            }
-        }
-
-        // 2) AJAX con i cookie della pagina, come fa il browser
-        for (endpoint in listOf("linkEmbedView.php", "linkView.php")) {
+        // 1) catena di redirect a mano clicka -> landing reale, cookie a ogni salto
+        var current = url
+        val jar = mutableMapOf<String, String>()
+        var reached = false
+        for (hop in 0 until 5) {
             if (System.currentTimeMillis() >= deadline) {
                 shNote(idx, "c deadline")
                 return null
             }
-            val body = "id=$id&ref=".toRequestBody(
-                "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
+            val headers = navHeaders(mainUrl + SHOW_PATH).toMutableMap()
+            headers["Range"] = "bytes=0-0"
+            shCookieHeader(jar)?.let { headers["Cookie"] = it }
+            val resp = runCatching {
+                app.get(current, headers = headers, timeout = HTTP_TIMEOUT_S, allowRedirects = false)
+            }.getOrNull()
+            if (resp == null) {
+                Log.i(TAG, "clicka: GET fallito (rete/timeout) $current")
+                shNote(idx, "c RETE")
+                return null
+            }
+            jar.putAll(resp.cookies)
+            when {
+                resp.code in 300..399 -> {
+                    val loc = resp.headers.values("location").firstOrNull()?.trim()
+                    if (loc.isNullOrEmpty()) {
+                        shNote(idx, "c noLoc")
+                        return null
+                    }
+                    current = runCatching { URI(current).resolve(loc).toString() }
+                        .getOrNull() ?: run { shNote(idx, "c badLoc"); return null }
+                }
+                resp.code == 200 -> {
+                    reached = true
+                }
+                else -> {
+                    Log.i(TAG, "clicka: GET HTTP ${resp.code} su $current")
+                    shNote(idx, "c ${resp.code}")
+                    return null
+                }
+            }
+            if (reached) break
+        }
+
+        // Atterrati direttamente su un host video? Nessun POST necessario.
+        val landingHost = runCatching { URI(current).host ?: "" }.getOrDefault("")
+        if (landingHost.contains("safego", ignoreCase = true) ||
+            landingHost.contains("clicka", ignoreCase = true)
+        ) {
+            shNote(idx, "c\u2192" + shTag(current))
+        } else {
+            shNote(idx, "c\u2192" + shTag(current))
+            return current
+        }
+
+        // 2) POST della landing safego/clicka (flusso real_page MammaMia):
+        //    Firefox + Origin/Referer same-site + cookie della GET
+        for (postHop in 0 until 2) {
+            if (System.currentTimeMillis() >= deadline) {
+                shNote(idx, "c deadline")
+                return null
+            }
+            val postHeaders = mutableMapOf(
+                "User-Agent" to SH_FF_UA,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.5",
+                "Content-Type" to "application/x-www-form-urlencoded",
+                "Origin" to "https://$landingHost",
+                "Referer" to current,
+                "Upgrade-Insecure-Requests" to "1",
+                "Sec-Fetch-Dest" to "document",
+                "Sec-Fetch-Mode" to "navigate",
+                "Sec-Fetch-Site" to "same-origin",
             )
-            val headers = navHeaders(null) + mapOf(
-                "Accept" to "application/json, text/javascript, */*; q=0.01",
-                "Origin" to "https://clicka.cc",
-                "Referer" to url,
-                "X-Requested-With" to "XMLHttpRequest",
-            ) + (shCookieHeader(jar)?.let { mapOf("Cookie" to it) } ?: emptyMap())
+            shCookieHeader(jar)?.let { postHeaders["Cookie"] = it }
             val resp = runCatching {
                 app.post(
-                    "https://clicka.cc/ajax/$endpoint",
-                    headers = headers,
-                    requestBody = body,
+                    current,
+                    headers = postHeaders,
+                    requestBody = "".toRequestBody(
+                        "application/x-www-form-urlencoded".toMediaTypeOrNull()
+                    ),
                     timeout = HTTP_TIMEOUT_S,
                 )
             }.getOrNull()
             if (resp == null) {
-                Log.i(TAG, "clicka AJAX: richiesta fallita $endpoint")
-                shNote(idx, "cA RETE")
-                continue
+                shNote(idx, "cP RETE")
+                return null
             }
-            Log.i(TAG, "clicka AJAX: HTTP ${resp.code} da $endpoint (cookie: ${jar.size})")
-            shNote(idx, "cA ${resp.code}")
-            if (resp.code != 200) continue
-            // Se Cloudflare intercetta la POST la risposta e' HTML, non JSON:
-            // JSONObject lancia e si passa all'endpoint successivo.
-            val value = runCatching {
-                JSONObject(resp.text).optJSONObject("data")?.optString("value") ?: ""
-            }.getOrDefault("")
-            if (value.isBlank()) shNote(idx, "cA noJSON")
-            if (value.startsWith("http")) return value
-            if (value.isNotBlank()) {
-                htmlRedirect(value)?.let { return it }
-                MEDIA_RE.find(value)?.value?.let { return it }
+            Log.i(TAG, "clicka: POST HTTP ${resp.code} su $current")
+            shNote(idx, "cP ${resp.code}")
+            if (resp.code != 200) return null
+            jar.putAll(resp.cookies)
+            val doc = resp.document
+
+            // PRIMO anchor della pagina = link host video (esattamente MammaMia)
+            val first = doc.selectFirst("a[href]")?.attr("abs:href")
+            if (!first.isNullOrBlank() && first.startsWith("http")) {
+                if (first.contains("safego", ignoreCase = true) ||
+                    first.contains("clicka", ignoreCase = true)
+                ) {
+                    // ulteriore pagina protettore: si riposta sulla nuova landing
+                    if (postHop == 0) {
+                        current = first
+                        continue
+                    }
+                } else {
+                    shNote(idx, "c\u2192" + shTag(first))
+                    return first
+                }
             }
+
+            // Captcha del protettore (immagine data URI come prima <img>)?
+            if (doc.selectFirst("img[src^=data:image]") != null) {
+                Log.i(TAG, "clicka: pagina captcha (serve OCR, come MammaMia)")
+                shNote(idx, "c capt")
+                return null
+            }
+            // Pagina 404 del protettore (cookie/sessione non valida)?
+            if (resp.text.contains("The requested URL was not found", ignoreCase = true)) {
+                shNote(idx, "c 404p")
+                return null
+            }
+            // Redirect dentro l'HTML: si riposta sulla nuova destinazione
+            if (postHop == 0) {
+                val redir = htmlRedirect(resp.text)
+                if (redir != null && redir.startsWith("http")) {
+                    current = redir
+                    continue
+                }
+            }
+            shNote(idx, "c noURL")
+            return null
         }
         shNote(idx, "c noURL")
         return null
@@ -662,9 +781,10 @@ class SisterHappy : MainAPI() {
                 MixDropExtractor { s -> shNote(idx, s) }
                     .getUrl(url, mainUrl, subtitleCallback, callback)
             }
-            url.contains("deltabit", ignoreCase = true) -> {
+            url.contains("deltabit", ignoreCase = true) ||
+                url.contains("turbovid", ignoreCase = true) -> {
                 shNote(idx, "ex:db")
-                DeltaBitExtractor { s -> shNote(idx, s) }
+                DeltaBitExtractor(deadline) { s -> shNote(idx, s) }
                     .getUrl(url, mainUrl, subtitleCallback, callback)
             }
             else -> {
