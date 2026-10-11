@@ -1,5 +1,6 @@
 package it.retrocinema.sisterhappy
 
+import android.graphics.BitmapFactory
 import android.widget.Toast
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.CommonActivity
@@ -114,6 +115,19 @@ data class ShEpisodeData(
  *   sua traccia, FINE = riepilogo. Dicono esattamente dove muore la catena
  *   senza collegare il telefono al PC (i log completi restano nel TAG
  *   "SisterHappy" del visualizzatore log dell'app).
+ * Punti chiave della v11 (captcha safego risolto in locale, niente WebView):
+ * - CANALE PRINCIPALE = clicka (DeltaBit/MixDrop): la catena redirect+POST
+ *   della v10 arriva alla landing safego ma riceve un CAPTCHA DI CIFRE
+ *   (traccia "c capt"). MammaMia lo risolve in automatico (tesseract): qui
+ *   c'e' l'equivalente in puro Kotlin (ShOcr): GET della landing -> prima
+ *   <img> data URI -> OCR cifre locale -> POST captch5=<cifre> -> il primo
+ *   anchor e' l'host video. Fino a 3 tentativi con captcha freschi e soglia
+ *   di fiducia progressiva; i cookie di sessione risolti restano in cache
+ *   per gli episodi successivi (come il cookie.txt di MammaMia).
+ * - UPROT/MaxStream ULTIMO: l'interstiziale Cloudflare (traccia "u chal") e'
+ *   un muro su TLS/impronta del client HTTP che le richieste pure non
+ *   superano (MammaMia stesso rinuncia e chiede il captcha manuale): resta
+ *   in coda nel caso il sito lo disattivi.
  * Punti chiave della v10 (flussi MammaMia aggiornati a ott. 2026):
  * - UPROT con header browser COMPLETI: Origin https://uprot.net/ + Referer del
  *   link msf (stesso sito) + Sec-Fetch/sec-ch-ua, come fa MammaMia (che con
@@ -164,6 +178,13 @@ class SisterHappy : MainAPI() {
 
         /** Timeout di ogni singola richiesta HTTP, in SECONDI (l'unita' di nicehttp). */
         private const val HTTP_TIMEOUT_S = 8L
+
+        /**
+         * Cookie di sessione del protettore safego: dopo il PRIMO captcha
+         * risolto restano validi ancora per un po' (lo stesso trucco del
+         * cookie.txt di MammaMia): gli episodi successivi passano senza OCR.
+         */
+        private val shSafegoJar = java.util.concurrent.ConcurrentHashMap<String, String>()
 
         /** URL verso un host video noto, in qualunque parte del codice HTML. */
         private val KNOWN_HOST_RE = Regex(
@@ -411,12 +432,17 @@ class SisterHappy : MainAPI() {
             return false
         }
 
-        // Il canale affidabile e' uprot -> MaxStream: va per primo.
-        // clicka (DeltaBit/MixDrop) e' dietro Cloudflare: si tenta dopo, via AJAX.
+        // Canale affidabile = clicka -> DeltaBit/MixDrop: il captcha della
+        // landing safego e' risolto in locale dall'OCR (v11). uprot ->
+        // MaxStream va per ultimo: l'interstiziale Cloudflare blocca le
+        // richieste pure (traccia "u chal") e solo un sito meno protetto
+        // potrebbe farlo tornare utile.
         val ordered = episode.links.sortedBy { link ->
             when {
-                link.url.contains("uprot.net", ignoreCase = true) -> 0
-                else -> 1
+                link.url.contains("clicka.cc/delta", ignoreCase = true) -> 0
+                link.url.contains("clicka.cc/mix", ignoreCase = true) -> 1
+                link.url.contains("uprot.net", ignoreCase = true) -> 3
+                else -> 2
             }
         }
         shTraceReset(ordered.size)
@@ -446,7 +472,12 @@ class SisterHappy : MainAPI() {
         }
         val okCount = results.count { it }
         Log.i(TAG, "loadLinks finito: ${okCount > 0} su ${ordered.size} link")
-        shToast("FINE $okCount/${ordered.size}")
+        // Riepilogo compatto: per ogni link l'ultima nota della traccia, cosi'
+        // l'ultimo toast dice in UNA riga dove sono morte le catene
+        val summary = (0 until ordered.size).joinToString(" ") { i ->
+            "B${i + 1}:" + shTraceOf(i).trim().substringAfterLast(' ', "-").take(14)
+        }
+        shToast("FINE $okCount/${ordered.size} $summary".take(220))
         return okCount > 0
     }
 
@@ -611,13 +642,16 @@ class SisterHappy : MainAPI() {
      *    User-Agent Firefox (scelta MammaMia): la risposta ha come PRIMO anchor
      *    il link dell'host video;
      * 3) se invece della pagina col link arriva un'immagine captcha (data URI),
-     *    il protettore esige l'OCR: traccia "c capt" (MammaMia lo risolve con
-     *    tesseract; qui per ora lo segnaliamo a schermo).
+     *    il protettore esige l'OCR: si passa a solveClickaCaptcha che lo
+     *    risolve in locale (v11, flusso MammaMia captch5 con OCR cifre).
      */
     private suspend fun resolveClicka(idx: Int, url: String, deadline: Long): String? {
         // 1) catena di redirect a mano clicka -> landing reale, cookie a ogni salto
         var current = url
         val jar = mutableMapOf<String, String>()
+        // Cookie di sessione gia' risolti in passato: con questi la PRIMA POST
+        // della landing puo' gia' restituire l'anchor, senza toccare l'OCR
+        if (shSafegoJar.isNotEmpty()) jar.putAll(shSafegoJar)
         var reached = false
         for (hop in 0 until 5) {
             if (System.currentTimeMillis() >= deadline) {
@@ -722,14 +756,19 @@ class SisterHappy : MainAPI() {
                     }
                 } else {
                     shNote(idx, "c\u2192" + shTag(first))
+                    shSafegoJar.putAll(jar)
                     return first
                 }
             }
 
-            // Captcha del protettore (immagine data URI come prima <img>)?
-            if (doc.selectFirst("img[src^=data:image]") != null) {
-                Log.i(TAG, "clicka: pagina captcha (serve OCR, come MammaMia)")
-                shNote(idx, "c capt")
+            // Captcha del protettore (immagine data URI): si risolve in locale
+            // con l'OCR delle cifre (flusso MammaMia captch5, vedi sotto)
+            if (doc.selectFirst("img[src^=data:image]") != null ||
+                resp.text.contains("captch5", ignoreCase = true)
+            ) {
+                Log.i(TAG, "clicka: captcha del protettore -> OCR cifre locale")
+                val solved = solveClickaCaptcha(idx, current, jar, deadline)
+                if (solved != null) return solved
                 return null
             }
             // Pagina 404 del protettore (cookie/sessione non valida)?
@@ -757,6 +796,145 @@ class SisterHappy : MainAPI() {
         META_REFRESH_RE.find(html)?.groupValues?.get(1)?.trim()?.let { if (it.startsWith("http")) return it }
         JS_LOCATION_RE.find(html)?.groupValues?.get(1)?.trim()?.let { if (it.startsWith("http")) return it }
         return null
+    }
+
+    /**
+     * Risolve il captcha del protettore safego/clicka in LOCALE, replicando il
+     * flusso MammaMia (get_numbers + convert_numbers + POST captch5) senza
+     * tesseract e senza WebView:
+     * 1) GET della landing con User-Agent Firefox (senza Range): il
+     *    protettore genera un captcha fresco legato ai cookie di sessione;
+     * 2) la prima <img> con src data:image e' l'immagine del captcha;
+     * 3) OCR cifre in puro Kotlin (ShOcr, template multi-font 12x16);
+     * 4) POST captch5=<cifre> con cookie + Origin/Referer same-site:
+     *    la risposta ha come PRIMO anchor il link dell'host video.
+     * Fino a 3 tentativi (a ogni GET un captcha nuovo); la soglia di fiducia
+     * dell'OCR si allarga a ogni giro (0.05 / 0.02 / 0.0): non si spediscono
+     * risposte azzardate quando si puo' riprovare con un codice fresco.
+     */
+    private suspend fun solveClickaCaptcha(
+        idx: Int,
+        url: String,
+        jar: MutableMap<String, String>,
+        deadline: Long,
+    ): String? {
+        val gates = doubleArrayOf(0.05, 0.02, 0.0)
+        var current = url
+        for (attempt in gates.indices) {
+            if (System.currentTimeMillis() >= deadline) {
+                shNote(idx, "c deadline")
+                return null
+            }
+            // 1) GET della landing: captcha fresco + cookie di sessione
+            val getHeaders = mutableMapOf(
+                "User-Agent" to SH_FF_UA,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.5",
+                "Upgrade-Insecure-Requests" to "1",
+            )
+            shCookieHeader(jar)?.let { getHeaders["Cookie"] = it }
+            val getResp = runCatching {
+                app.get(current, headers = getHeaders, timeout = HTTP_TIMEOUT_S)
+            }.getOrNull()
+            if (getResp == null) {
+                shNote(idx, "cO RETE")
+                return null
+            }
+            jar.putAll(getResp.cookies)
+            if (getResp.code != 200) {
+                shNote(idx, "cO ${getResp.code}")
+                return null
+            }
+            // 2) immagine captcha: prima <img> con src data:image (formato MammaMia)
+            val dataUri = getResp.document.selectFirst("img[src^=data:image]")?.attr("src")
+            if (dataUri.isNullOrBlank() || !dataUri.contains(",")) {
+                shNote(idx, "cO noimg")
+                return null
+            }
+            // 3) OCR cifre locale (nessuna libreria esterna, nessun servizio)
+            val ocr = runCatching { shOcrFromDataUri(dataUri) }.getOrNull()
+            if (ocr == null || ocr.margin < gates[attempt]) {
+                Log.i(TAG, "clicka captcha: lettura non sicura al tentativo ${attempt + 1}")
+                shNote(idx, "cO?")
+                continue
+            }
+            shNote(idx, "cO=${ocr.text}")
+            // 4) POST captch5 (header del flusso real_page)
+            val host = runCatching { URI(current).host ?: "" }.getOrDefault("")
+            val postHeaders = mutableMapOf(
+                "User-Agent" to SH_FF_UA,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.5",
+                "Content-Type" to "application/x-www-form-urlencoded",
+                "Origin" to "https://$host",
+                "Referer" to current,
+                "Upgrade-Insecure-Requests" to "1",
+                "Sec-Fetch-Dest" to "document",
+                "Sec-Fetch-Mode" to "navigate",
+                "Sec-Fetch-Site" to "same-origin",
+            )
+            shCookieHeader(jar)?.let { postHeaders["Cookie"] = it }
+            val resp = runCatching {
+                app.post(
+                    current,
+                    headers = postHeaders,
+                    requestBody = "captch5=${ocr.text}".toRequestBody(
+                        "application/x-www-form-urlencoded".toMediaTypeOrNull()
+                    ),
+                    timeout = HTTP_TIMEOUT_S,
+                )
+            }.getOrNull()
+            if (resp == null) {
+                shNote(idx, "cP RETE")
+                return null
+            }
+            jar.putAll(resp.cookies)
+            Log.i(TAG, "clicka captcha: POST HTTP ${resp.code} (tentativo ${attempt + 1}, codice ${ocr.text})")
+            shNote(idx, "cP ${resp.code}")
+            if (resp.code != 200) return null
+            val first = resp.document.selectFirst("a[href]")?.attr("abs:href")
+            if (!first.isNullOrBlank() && first.startsWith("http")) {
+                if (first.contains("safego", ignoreCase = true) ||
+                    first.contains("clicka", ignoreCase = true)
+                ) {
+                    // ancora una landing del protettore: si riparte col GET
+                    current = first
+                    continue
+                }
+                shNote(idx, "c\u2192" + shTag(first))
+                shSafegoJar.putAll(jar)
+                return first
+            }
+            // risposta senza anchor: captcha sbagliato o scaduto, si riprova
+        }
+        shNote(idx, "cO KO")
+        return null
+    }
+
+    /**
+     * Da un data URI (immagine del captcha) all'OCR: base64 -> Bitmap
+     * Android -> luminanza intera -> ShOcr.read (template 12x16).
+     */
+    private fun shOcrFromDataUri(dataUri: String): ShOcr.Res? {
+        val b64 = dataUri.substringAfter(',', "").filter { !it.isWhitespace() }
+        if (b64.isEmpty()) return null
+        val bytes = runCatching { java.util.Base64.getMimeDecoder().decode(b64) }
+            .getOrNull() ?: return null
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        val w = bmp.width
+        val h = bmp.height
+        if (w <= 0 || h <= 0 || w > 2000 || h > 2000) return null
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        val gray = IntArray(w * h)
+        for (i in px.indices) {
+            val p = px[i]
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            gray[i] = (r * 299 + g * 587 + b * 114) / 1000
+        }
+        return ShOcr.read(gray, w, h)
     }
 
     /** Manda l'URL finale all'estrattore dell'host giusto (o all'estrazione generica). */
