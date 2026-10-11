@@ -50,7 +50,10 @@ fun shFindM3u8(body: String): String? =
  * 2. pagina player legacy con script "eval(function(p,a,c,k,e,d)...)" da
  *    spacchettare (logica da provider CB01 GPL di DieGon7771).
  */
-class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
+class MaxStreamExtractor(
+    private val deadline: Long = 0L,
+    private val note: (String) -> Unit = {},
+) : ExtractorApi() {
     override var name = "MaxStream"
     override var mainUrl = "https://maxstream.video/"
     override val requiresReferer = false
@@ -82,16 +85,18 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
             shCookieHeader(jar)?.let { headers["Cookie"] = it }
             val resp = runCatching {
                 app.get(current, headers = headers, timeout = 12, allowRedirects = false)
-            }.getOrNull() ?: return
+            }.getOrNull() ?: run { note("ms RETE"); return }
             jar.putAll(resp.cookies)
             when {
                 resp.code in 300..399 -> {
                     val loc = resp.headers.values("location").firstOrNull()?.trim()
                     if (loc.isNullOrEmpty()) {
                         Log.d(name, "uprots: redirect senza Location da $current")
+                        note("ms noLoc")
                         return
                     }
-                    current = runCatching { URI(current).resolve(loc).toString() }.getOrNull() ?: return
+                    current = runCatching { URI(current).resolve(loc).toString() }.getOrNull()
+                        ?: run { note("ms badLoc"); return }
                 }
                 resp.code == 200 -> {
                     body = resp.text
@@ -99,12 +104,14 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
                 }
                 else -> {
                     Log.d(name, "uprots GET status ${resp.code} su $current")
+                    note("ms ${resp.code}")
                     return
                 }
             }
         }
         val finalBody = body ?: run {
             Log.d(name, "uprots: nessuna pagina 200 nella catena")
+            note("ms no200")
             return
         }
         val finalUrl = current
@@ -130,9 +137,10 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
                 Log.d(name, "provo player $playerUrl")
                 val playerResp = runCatching {
                     app.get(playerUrl, headers = shFullHeaders(referer = finalUrl), timeout = 12)
-                }.getOrNull() ?: continue
+                }.getOrNull() ?: run { note("p RETE"); continue }
                 if (playerResp.code != 200) {
                     Log.d(name, "player HTTP ${playerResp.code}")
+                    note("p ${playerResp.code}")
                     continue
                 }
                 shFindM3u8(playerResp.text)?.let { emit(it, callback); return }
@@ -151,11 +159,13 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
             if (iframeResp != null && iframeResp.code == 200) {
                 shFindM3u8(iframeResp.text)?.let { emit(it, callback); return }
                 unpackSource(iframeResp.text)?.let { emit(it, callback); return }
+            } else {
+                note("if ${iframeResp?.code ?: 0}")
             }
         }
 
         // Ultima spiaggia: script packed nella pagina finale
-        unpackSource(finalBody)?.let { emit(it, callback) }
+        unpackSource(finalBody)?.let { emit(it, callback) } ?: run { note("nosrc") }
     }
 
     /** Forma legacy: pagina player con evalpacked (vecchio formato). */
@@ -166,12 +176,13 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
     ) {
         val response = runCatching {
             app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 12)
-        }.getOrNull() ?: return
+        }.getOrNull() ?: run { note("RETE"); return }
         val body = response.body.string()
 
         val src = shFindM3u8(body) ?: unpackSource(body)
         if (src.isNullOrBlank()) {
             Log.d(name, "Nessuna sorgente trovata in $url")
+            note("nosrc")
             return
         }
         emit(src, callback)
@@ -199,6 +210,7 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
     }
 
     private suspend fun emit(src: String, callback: (ExtractorLink) -> Unit) {
+        note("EMIT")
         callback.invoke(
             newExtractorLink(
                 source = name,
@@ -217,7 +229,7 @@ class MaxStreamExtractor(private val deadline: Long = 0L) : ExtractorApi() {
  * DeltaBit: pagina player (domini deltabit vari, finali della catena clicka/adelta)
  * con sorgente dentro jwplayer o script packed. Estrazione tollerante.
  */
-class DeltaBitExtractor : ExtractorApi() {
+class DeltaBitExtractor(private val note: (String) -> Unit = {}) : ExtractorApi() {
     override var name = "DeltaBit"
     override var mainUrl = "https://deltabit.co/"
     override val requiresReferer = false
@@ -230,15 +242,17 @@ class DeltaBitExtractor : ExtractorApi() {
     ) {
         val response = runCatching {
             app.get(url, headers = shFullHeaders(referer = referer ?: mainUrl), timeout = 12)
-        }.getOrNull() ?: return
+        }.getOrNull() ?: run { note("RETE"); return }
         val body = response.body.string()
 
         val link = shFindM3u8(body)
             ?: findOtherSource(body)
         if (link.isNullOrBlank()) {
             Log.d(name, "Nessuna sorgente trovata in $url")
+            note("nosrc")
             return
         }
+        note("EMIT")
         val isHls = link.substringBefore('?').lowercase().endsWith(".m3u8")
         callback.invoke(
             newExtractorLink(
@@ -281,7 +295,7 @@ class DeltaBitExtractor : ExtractorApi() {
  * MixDrop: pagina /e/<id> con script packed contenente wurl="https://...m3u8".
  * Estrazione via HTTP leggera (niente WebView): unpack + regex di riserva.
  */
-class MixDropExtractor : ExtractorApi() {
+class MixDropExtractor(private val note: (String) -> Unit = {}) : ExtractorApi() {
     override var name = "MixDrop"
     override var mainUrl = "https://mixdrop.top/"
     override val requiresReferer = false
@@ -300,14 +314,16 @@ class MixDropExtractor : ExtractorApi() {
                 headers = shFullHeaders(referer = referer ?: mainUrl),
                 timeout = 12,
             )
-        }.getOrNull() ?: return
+        }.getOrNull() ?: run { note("RETE"); return }
         val body = response.body.string()
 
         val link = findVideo(body)
         if (link.isNullOrBlank()) {
             Log.d(name, "Nessuna sorgente trovata in $playerUrl")
+            note("nosrc")
             return
         }
+        note("EMIT")
         val isHls = link.substringBefore('?').lowercase().endsWith(".m3u8")
         callback.invoke(
             newExtractorLink(

@@ -1,6 +1,8 @@
 package it.retrocinema.sisterhappy
 
+import android.widget.Toast
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -26,10 +28,62 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
+import java.net.InetAddress
 
 /** User-Agent realistico da browser desktop. */
 const val SH_UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+/**
+ * ------------------------------------------------------------------
+ * TOAST DIAGNOSTICI (v9)
+ * ------------------------------------------------------------------
+ * Breve messaggio a schermo (gli stessi toast dell'app) per capire DOVE
+ * muore la catena dei link, senza collegare il telefono al PC:
+ * - "SH A ..."      : avvio, numero di link, esito del DNS del telefono
+ * - "SH B1/B2/..."  : esito di ogni singolo link con la sua traccia
+ * - "SH FINE x/n"   : quanti link sono stati emessi davvero
+ * Ogni toast rimpiazza il precedente: gli ultimi a schermo sono i piu'
+ * significativi. Il dettaglio completo resta nei log TAG "SisterHappy".
+ */
+const val SH_DEBUG_TOASTS = true
+
+private val shTraceLock = Any()
+private var shTraceList: List<StringBuilder> = emptyList()
+
+/** Nota nella traccia del link [idx] (primo link = 0). */
+fun shNote(idx: Int, msg: String) {
+    synchronized(shTraceLock) {
+        shTraceList.getOrNull(idx)?.append(msg)?.append(' ')
+    }
+}
+
+/** Traccia del link [idx] (parte finale: i toast hanno spazio limitato). */
+fun shTraceOf(idx: Int, max: Int = 90): String = synchronized(shTraceLock) {
+    shTraceList.getOrNull(idx)?.toString()?.trim()?.takeLast(max) ?: ""
+}
+
+/** Prepara una traccia vuota per ognuno dei [n] link da risolvere. */
+fun shTraceReset(n: Int) {
+    synchronized(shTraceLock) {
+        shTraceList = List(n.coerceAtLeast(1)) { StringBuilder() }
+    }
+}
+
+/** Toast a schermo; silenzioso se SH_DEBUG_TOASTS e' false. */
+fun shToast(msg: String) {
+    if (!SH_DEBUG_TOASTS) return
+    runCatching { CommonActivity.showToast("SH $msg", Toast.LENGTH_LONG) }
+        .onFailure { Log.e("SisterHappy", "toast fallito: ${it.message}") }
+}
+
+/** Etichetta corta di un URL: host + ultimo segmento (per i toast). */
+fun shTag(url: String): String {
+    val clean = url.substringAfter("://").removePrefix("www.")
+    val host = clean.substringBefore('/')
+    val tail = clean.trimEnd('/').substringAfterLast('/')
+    return if (tail.isNotEmpty() && tail != host) "$host/$tail" else host
+}
 
 /** Un link di un episodio: url del protettore (o diretto) + etichetta dell'host letta dalla pagina. */
 data class ShLink(
@@ -54,6 +108,12 @@ data class ShEpisodeData(
  *     "15x01 Audizioni 1 - <a href=protettore>MaxStream</a> - <a>DeltaBit</a>"
  * - i link passano da protettori (uprot.net, clicka.cc) che nascondono gli host video
  *
+ * Punti chiave della v9 (diagnostica a schermo):
+ * - TOAST DIAGNOSTICI: ad ogni apertura episodio compaiono brevi messaggi a
+ *   schermo: A = avvio con esito DNS, B1/B2/.. = esito di ogni link con la
+ *   sua traccia, FINE = riepilogo. Dicono esattamente dove muore la catena
+ *   senza collegare il telefono al PC (i log completi restano nel TAG
+ *   "SisterHappy" del visualizzatore log dell'app).
  * Punti chiave della v8 (diagnostica sul campo):
  * - RICERCA MONO-SERIE: il plugin risponde solo con la sua serie, mai risultati
  *   estranei del sito (il tester interno dell'app prova il PRIMO risultato di
@@ -321,8 +381,15 @@ class SisterHappy : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val episode = tryParseJson<ShEpisodeData>(data) ?: return false
-        if (episode.links.isEmpty()) return false
+        val episode = tryParseJson<ShEpisodeData>(data)
+        if (episode == null) {
+            shToast("A dati episodio illeggibili")
+            return false
+        }
+        if (episode.links.isEmpty()) {
+            shToast("A 0 link nell'episodio")
+            return false
+        }
 
         // Il canale affidabile e' uprot -> MaxStream: va per primo.
         // clicka (DeltaBit/MixDrop) e' dietro Cloudflare: si tenta dopo, via AJAX.
@@ -332,23 +399,40 @@ class SisterHappy : MainAPI() {
                 else -> 1
             }
         }
+        shTraceReset(ordered.size)
+
+        // Diagnostica v9: il DNS del telefono risolve uprot.net? (il browser
+        // puo' usare un DNS diverso da quello dell'app: se qui esce BLOCCATO
+        // il problema e' di rete, non di scraping)
+        val dns = runCatching { InetAddress.getByName("uprot.net").hostAddress }
+            .getOrNull()?.take(16)
+        shToast("A ${ordered.size} link DNS=${dns ?: "BLOCCATO"}")
+
         val deadline = System.currentTimeMillis() + DEADLINE_MS
 
         // I link vengono risolti in parallelo: ogni catena e' lineare e corta,
         // quindi il tempo totale resta sotto il tetto.
-        val results = ordered.amap { link ->
+        val results = ordered.mapIndexed { i, link -> i to link }.amap { (i, link) ->
             if (System.currentTimeMillis() >= deadline || link.url.isBlank()) false
             else runCatching {
-                resolveAndExtract(link.url, deadline, subtitleCallback, callback)
-            }.onFailure { Log.e(TAG, "errore su ${link.url}: ${it.message}") }.getOrDefault(false)
+                shNote(i, "da:" + shTag(link.url))
+                resolveAndExtract(i, link.url, deadline, subtitleCallback, callback)
+            }.onFailure {
+                Log.e(TAG, "errore su ${link.url}: ${it.message}")
+                shNote(i, "ERR:${it.message?.take(20)}")
+            }.getOrDefault(false).also { r ->
+                shToast("B${i + 1} ${if (r) "OK" else "KO"} ${shTraceOf(i)}")
+            }
         }
-        val ok = results.any { it }
-        Log.i(TAG, "loadLinks finito: $ok su ${ordered.size} link")
-        return ok
+        val okCount = results.count { it }
+        Log.i(TAG, "loadLinks finito: ${okCount > 0} su ${ordered.size} link")
+        shToast("FINE $okCount/${ordered.size}")
+        return okCount > 0
     }
 
     /** Risolve l'eventuale protettore con una catena lineare e delega all'estrattore finale. */
     private suspend fun resolveAndExtract(
+        idx: Int,
         url: String,
         deadline: Long,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -362,14 +446,15 @@ class SisterHappy : MainAPI() {
 
         val target = when {
             isLeafHost(url) -> url
-            url.contains("uprot.net", ignoreCase = true) -> resolveUprot(url, deadline)
+            url.contains("uprot.net", ignoreCase = true) -> resolveUprot(idx, url, deadline)
             url.contains("clicka.cc", ignoreCase = true) ||
-                url.contains("safego.cc", ignoreCase = true) -> resolveClicka(url, deadline)
+                url.contains("safego.cc", ignoreCase = true) -> resolveClicka(idx, url, deadline)
             else -> url // host diretto non noto: si prova comunque l'estrazione
         } ?: return false
 
+        shNote(idx, "→" + shTag(target))
         Log.i(TAG, "host finale raggiunto: $target")
-        extractFinal(target, deadline, subtitleCallback, wrapped)
+        extractFinal(idx, target, deadline, subtitleCallback, wrapped)
         return emitted
     }
 
@@ -380,10 +465,13 @@ class SisterHappy : MainAPI() {
      * (il client dell'app non ha cookie jar). Se il Continue rimanda a un'altra
      * pagina uprot si segue per al massimo 2 salti.
      */
-    private suspend fun resolveUprot(url: String, deadline: Long): String? {
+    private suspend fun resolveUprot(idx: Int, url: String, deadline: Long): String? {
         var current = url
         for (hop in 0 until 3) {
-            if (System.currentTimeMillis() >= deadline) return null
+            if (System.currentTimeMillis() >= deadline) {
+                shNote(idx, "u deadline")
+                return null
+            }
             val candidates = if (current.contains("/msf/", ignoreCase = true))
                 listOf(current.replace("/msf/", "/mse/", ignoreCase = true), current)
             else listOf(current)
@@ -394,17 +482,21 @@ class SisterHappy : MainAPI() {
                 val resp = shGet(candidate, referer = mainUrl + SHOW_PATH, cookie = shCookieHeader(jar))
                 if (resp == null) {
                     Log.i(TAG, "uprot: richiesta fallita (DNS/rete/timeout) $candidate")
+                    shNote(idx, "u RETE")
                     continue
                 }
                 Log.i(TAG, "uprot: HTTP ${resp.code} su $candidate")
                 if (resp.code == 403) {
                     Log.i(TAG, "uprot: blocco 403 (WAF/bot) su $candidate")
+                    shNote(idx, "u 403WAF")
                     continue
                 }
+                if (resp.code != 200) shNote(idx, "u ${resp.code}")
                 jar = jar + resp.cookies
                 next = parseUprotPage(resp.text, resp.document)
                 if (next == null) {
                     Log.i(TAG, "uprot: nessun Continue/host trovato nella pagina $candidate")
+                    shNote(idx, "u noCONT")
                     continue
                 }
                 break
@@ -412,9 +504,13 @@ class SisterHappy : MainAPI() {
             if (next == null) return null
             // Si accetta qualunque destinazione http (anche dominio nuovo):
             // l'estrazione finale generica la sa gestire. Se e' ancora uprot si continua.
-            if (!next.contains("uprot.net", ignoreCase = true)) return next
+            if (!next.contains("uprot.net", ignoreCase = true)) {
+                shNote(idx, "u→" + shTag(next))
+                return next
+            }
             current = next
         }
+        shNote(idx, "u loop")
         return null
     }
 
@@ -469,7 +565,7 @@ class SisterHappy : MainAPI() {
      * 3) fallback /ajax/linkView.php. Se "value" non e' un URL si cerca
      * dentro redirect o file video.
      */
-    private suspend fun resolveClicka(url: String, deadline: Long): String? {
+    private suspend fun resolveClicka(idx: Int, url: String, deadline: Long): String? {
         val id = url.trimEnd('/').substringAfterLast('/')
         if (id.isBlank()) return null
 
@@ -478,8 +574,10 @@ class SisterHappy : MainAPI() {
         val page = shGet(url, referer = mainUrl + SHOW_PATH)
         if (page == null) {
             Log.i(TAG, "clicka: GET pagina fallito (DNS/rete/timeout) $url")
+            shNote(idx, "c RETE")
         } else {
             Log.i(TAG, "clicka: GET pagina HTTP ${page.code}")
+            shNote(idx, "c ${page.code}")
             jar = page.cookies
             if (page.code == 200) {
                 KNOWN_HOST_RE.find(page.text)?.value?.let { return it }
@@ -490,7 +588,10 @@ class SisterHappy : MainAPI() {
 
         // 2) AJAX con i cookie della pagina, come fa il browser
         for (endpoint in listOf("linkEmbedView.php", "linkView.php")) {
-            if (System.currentTimeMillis() >= deadline) return null
+            if (System.currentTimeMillis() >= deadline) {
+                shNote(idx, "c deadline")
+                return null
+            }
             val body = "id=$id&ref=".toRequestBody(
                 "application/x-www-form-urlencoded; charset=UTF-8".toMediaTypeOrNull()
             )
@@ -510,21 +611,25 @@ class SisterHappy : MainAPI() {
             }.getOrNull()
             if (resp == null) {
                 Log.i(TAG, "clicka AJAX: richiesta fallita $endpoint")
+                shNote(idx, "cA RETE")
                 continue
             }
             Log.i(TAG, "clicka AJAX: HTTP ${resp.code} da $endpoint (cookie: ${jar.size})")
+            shNote(idx, "cA ${resp.code}")
             if (resp.code != 200) continue
             // Se Cloudflare intercetta la POST la risposta e' HTML, non JSON:
             // JSONObject lancia e si passa all'endpoint successivo.
             val value = runCatching {
                 JSONObject(resp.text).optJSONObject("data")?.optString("value") ?: ""
             }.getOrDefault("")
+            if (value.isBlank()) shNote(idx, "cA noJSON")
             if (value.startsWith("http")) return value
             if (value.isNotBlank()) {
                 htmlRedirect(value)?.let { return it }
                 MEDIA_RE.find(value)?.value?.let { return it }
             }
         }
+        shNote(idx, "c noURL")
         return null
     }
 
@@ -537,27 +642,41 @@ class SisterHappy : MainAPI() {
 
     /** Manda l'URL finale all'estrattore dell'host giusto (o all'estrazione generica). */
     private suspend fun extractFinal(
+        idx: Int,
         url: String,
         deadline: Long,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ) {
         // File video diretto: emesso subito, senza estrattore
-        if (emitDirectLink(url, callback)) return
+        if (emitDirectLink(idx, url, callback)) return
         when {
-            url.contains("maxstream", ignoreCase = true) ->
-                MaxStreamExtractor(deadline).getUrl(url, mainUrl, subtitleCallback, callback)
+            url.contains("maxstream", ignoreCase = true) -> {
+                shNote(idx, "ex:ms")
+                MaxStreamExtractor(deadline) { s -> shNote(idx, s) }
+                    .getUrl(url, mainUrl, subtitleCallback, callback)
+            }
             url.contains("mixdrop", ignoreCase = true) ||
-                url.contains("mxdrop", ignoreCase = true) ->
-                MixDropExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
-            url.contains("deltabit", ignoreCase = true) ->
-                DeltaBitExtractor().getUrl(url, mainUrl, subtitleCallback, callback)
+                url.contains("mxdrop", ignoreCase = true) -> {
+                shNote(idx, "ex:md")
+                MixDropExtractor { s -> shNote(idx, s) }
+                    .getUrl(url, mainUrl, subtitleCallback, callback)
+            }
+            url.contains("deltabit", ignoreCase = true) -> {
+                shNote(idx, "ex:db")
+                DeltaBitExtractor { s -> shNote(idx, s) }
+                    .getUrl(url, mainUrl, subtitleCallback, callback)
+            }
             else -> {
                 // Host non noto: prova gli estrattori registrati dall'app, poi l'estrazione generica
+                shNote(idx, "ex:app")
                 val handled = runCatching {
                     loadExtractor(url, mainUrl, subtitleCallback, callback)
                 }.getOrDefault(false)
-                if (!handled) selfExtract(url, callback)
+                if (!handled) {
+                    shNote(idx, "ex:gen")
+                    selfExtract(idx, url, callback)
+                }
             }
         }
     }
@@ -567,25 +686,31 @@ class SisterHappy : MainAPI() {
      * cerca al suo interno il file video con le stesse regex a cascata degli
      * estrattori dedicati. Copre i domini nuovi o cambiati senza toccare il codice.
      */
-    private suspend fun selfExtract(url: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun selfExtract(idx: Int, url: String, callback: (ExtractorLink) -> Unit) {
         val resp = shGet(url, referer = mainUrl + SHOW_PATH)
         if (resp == null) {
             Log.i(TAG, "selfExtract: richiesta fallita $url")
+            shNote(idx, "sx RETE")
             return
         }
         Log.i(TAG, "selfExtract: HTTP ${resp.code} su $url")
+        shNote(idx, "sx ${resp.code}")
         if (resp.code != 200) return
         val body = resp.text
         shFindM3u8(body)?.let {
             Log.i(TAG, "selfExtract: m3u8 ricavato dalla pagina")
-            emitDirectLink(it, callback)
+            emitDirectLink(idx, it, callback)
             return
         }
-        MEDIA_RE.find(body)?.value?.let { emitDirectLink(it, callback) }
+        MEDIA_RE.find(body)?.value?.let {
+            shNote(idx, "sx media")
+            emitDirectLink(idx, it, callback)
+        }
     }
 
     /** Se l'URL e' un file video diretto lo emette senza estrattore; dice se l'ha fatto. */
     private suspend fun emitDirectLink(
+        idx: Int,
         url: String,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
@@ -596,6 +721,7 @@ class SisterHappy : MainAPI() {
                 com.lagradost.cloudstream3.utils.ExtractorLinkType.VIDEO
             else -> return false
         }
+        shNote(idx, "EMIT")
         callback(
             com.lagradost.cloudstream3.utils.newExtractorLink(
                 source = name,
